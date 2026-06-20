@@ -589,3 +589,19 @@ AUTH_USER_MODEL = 'user_api.User'
 
 IMPORT_EXPORT_USE_TRANSACTIONS = True
 IMPORT_EXPORT_SKIP_ADMIN_LOG = False
+
+
+
+# settings.py er ekdom niche jog korun
+
+SWAGGER_SETTINGS = {
+    'SECURITY_DEFINITIONS': {
+        'Bearer': {
+            'type': 'apiKey',
+            'name': 'Authorization',
+            'in': 'header',
+            'description': "Format: Bearer <your_jwt_access_token>"
+        }
+    },
+    'USE_SESSION_AUTH': False, # Session auth disable kore shudhu Token/JWT specify kora
+}
