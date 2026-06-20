@@ -100,11 +100,14 @@ class ScheduleConstraint:
         day_id = day.id
         
         constraint_type = self.batch_constraints.get((course.department.id, course.semester.id, day_id, slot.id))
+        
+        # 1. User-defined constraints verification
         if constraint_type == 'CLASS_OFF':
             return True
         if slot.is_lunch_break and constraint_type != 'FORCE_ALLOW_LUNCH_CLASS':
             return True
 
+        # 2. Resource availability verification
         if course.teacher and (day_id, slot.id, course.teacher.id) in self.teacher_occupied:
             return True
 
@@ -235,11 +238,20 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
         time_slots = list(TimeSlot.objects.all().order_by('start_time'))
         all_active_rooms = list(Room.objects.filter(is_active=True))
 
+        # ======================================================================
+        # SENIOR FIX: Advanced Constraint Resolution Logic (Safe Dictionary)
+        # ======================================================================
         constraints_qs = BatchTimeConstraint.objects.filter(is_active=True)
-        batch_constraints_dict = {
-            (c.department_id, c.semester_id, c.day_id, c.time_slot_id): c.constraint_type
-            for c in constraints_qs
-        }
+        batch_constraints_dict = {}
+        
+        for c in constraints_qs:
+            key = (c.department_id, c.semester_id, c.day_id, c.time_slot_id)
+            # Priority Handling: If a 'CLASS_OFF' rule exists for this key, it strictly 
+            # overrides any other permissive rules.
+            if key in batch_constraints_dict and batch_constraints_dict[key] == 'CLASS_OFF':
+                continue
+            batch_constraints_dict[key] = c.constraint_type
+        # ======================================================================
 
         sorted_sessions = prepare_prioritized_sessions(courses_to_schedule)
         teacher_totals = {}
@@ -291,26 +303,22 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
                     if not constraints.can_schedule_daily(day.id, course, duration):
                         continue
 
-                    # ==================================================
-                    # THE MAGIC FIX: Magnetic Slot Selection
-                    # ==================================================
+                    # Magnetic Slot Selection Logic
                     b_key = (day.id, course.department.id, course.semester.id)
                     occupied_slots = constraints.batch_schedule_map.get(b_key, set())
                     
                     possible_starts = list(range(len(time_slots) - duration + 1))
                     
-                    # Function to score slots based on gap
                     def get_gap_score(start_idx):
                         if not occupied_slots:
-                            return start_idx # No classes yet, prefer morning
+                            return start_idx
                         min_dist = float('inf')
                         for o in occupied_slots:
                             dist = start_idx - o - 1 if o < start_idx else o - (start_idx + duration)
-                            if dist < 0: dist = 0 # Overlap will be handled by conflict checker
+                            if dist < 0: dist = 0 
                             if dist < min_dist: min_dist = dist
                         return min_dist
 
-                    # Sort slots: 1st priority: lowest gap, 2nd priority: morning
                     possible_starts.sort(key=lambda idx: (get_gap_score(idx), idx))
 
                     for i in possible_starts:
@@ -344,7 +352,6 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
                     for day in sorted_days:
                         if group_assigned: break
                         
-                        # Apply Magnetic Slot Selection in fallback too
                         b_key = (day.id, course.department.id, course.semester.id)
                         occupied_slots = constraints.batch_schedule_map.get(b_key, set())
                         possible_starts = list(range(len(time_slots) - duration + 1))
@@ -394,7 +401,7 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
                 "successful_classes": scheduled_count,
                 "dropped_classes": len(dropped_sessions),
                 "shortage_details": dropped_sessions,
-                "message": "সিস্টেমে কিছু ক্লাস বসানো সম্ভব হয়নি। আপনি চাইলে এই এরর ইগনোর করে আংশিক রুটিন সেভ করতে পারেন।"
+                "message": "সিস্টেমে কিছু ক্লাস বসানো সম্ভব হয়নি। আপনি চাইলে এই এরর ইগনোর করে আংশিক রুটিন সেভ করতে পারেন।"
             }
 
         summary_message = "রুটিন ১০০% সফলভাবে তৈরি হয়েছে!" if len(dropped_sessions) == 0 else "আংশিক রুটিন তৈরি করা হয়েছে।"
