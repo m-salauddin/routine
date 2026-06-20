@@ -387,18 +387,33 @@
 from pathlib import Path
 from datetime import timedelta
 import os
+import dj_database_url # Render-এর ডাটাবেস URL পার্স করার জন্য
 
+# Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
+# ==========================================
+# SECURITY SETTINGS
+# ==========================================
+
+# প্রোডাকশনের জন্য SECRET_KEY এনভায়রনমেন্ট ভেরিয়েবল থেকে আসবে
 SECRET_KEY = os.environ.get(
     "SECRET_KEY",
     "django-insecure-local-development-key"
 )
 
-DEBUG = os.environ.get("DEBUG", "True") == "True"
+# প্রোডাকশনে ডিফল্টভাবে False থাকবে, লোকাল মেশিনে True
+DEBUG = os.environ.get("DEBUG", "False") == "True"
 
-ALLOWED_HOSTS = ["*"]
+ALLOWED_HOSTS = os.environ.get("ALLOWED_HOSTS", "*").split(",")
 
+# Render-এ Django Admin প্যানেলে CSRF Error এড়ানোর জন্য এটি অপরিহার্য
+CSRF_TRUSTED_ORIGINS = ['https://*.onrender.com']
+
+
+# ==========================================
+# APPLICATIONS
+# ==========================================
 
 INSTALLED_APPS = [
     'django.contrib.admin',
@@ -408,6 +423,7 @@ INSTALLED_APPS = [
     'django.contrib.messages',
     'django.contrib.staticfiles',
 
+    # Third-party Apps
     'rest_framework',
     'rest_framework.authtoken',
     'rest_framework_simplejwt',
@@ -416,17 +432,22 @@ INSTALLED_APPS = [
     'drf_yasg',
     'import_export',
 
+    # Local Apps
     'user_api',
     'academic',
 ]
 
 
+# ==========================================
+# MIDDLEWARE
+# ==========================================
+
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
-    'whitenoise.middleware.WhiteNoiseMiddleware',
+    'whitenoise.middleware.WhiteNoiseMiddleware', # Whitenoise for static files
 
     'django.contrib.sessions.middleware.SessionMiddleware',
-    'corsheaders.middleware.CorsMiddleware',
+    'corsheaders.middleware.CorsMiddleware', # CORS Middleware
 
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
@@ -459,30 +480,20 @@ WSGI_APPLICATION = 'Class_Routine.wsgi.application'
 # ==========================================
 # DATABASE
 # ==========================================
+# dj_database_url ব্যবহার করে Render-এর DATABASE_URL স্বয়ংক্রিয়ভাবে কানেক্ট হবে।
+# আর লোকাল মেশিনে কাজ করার জন্য default url দেওয়া আছে।
 
-if os.environ.get("RENDER"):
-    DATABASES = {
-        "default": {
-            "ENGINE": "django.db.backends.postgresql",
-            "NAME": os.environ.get("DB_NAME"),
-            "USER": os.environ.get("DB_USER"),
-            "PASSWORD": os.environ.get("DB_PASSWORD"),
-            "HOST": os.environ.get("DB_HOST"),
-            "PORT": os.environ.get("DB_PORT", "5432"),
-        }
-    }
-else:
-    DATABASES = {
-        'default': {
-            'ENGINE': 'django.db.backends.postgresql',
-            'NAME': 'routine_project',
-            'USER': 'mdrashedulislamrabby',
-            'PASSWORD': '168315',
-            'HOST': 'localhost',
-            'PORT': '5432',
-        }
-    }
+DATABASES = {
+    'default': dj_database_url.config(
+        default='postgres://mdrashedulislamrabby:168315@localhost:5432/routine_project',
+        conn_max_age=600
+    )
+}
 
+
+# ==========================================
+# PASSWORD VALIDATION
+# ==========================================
 
 AUTH_PASSWORD_VALIDATORS = [
     {
@@ -500,21 +511,25 @@ AUTH_PASSWORD_VALIDATORS = [
 ]
 
 
+# ==========================================
+# INTERNATIONALIZATION
+# ==========================================
+
 LANGUAGE_CODE = 'en-us'
-
 TIME_ZONE = 'UTC'
-
 USE_I18N = True
-
 USE_TZ = True
 
+
+# ==========================================
+# STATIC & MEDIA FILES
+# ==========================================
 
 STATIC_URL = '/static/'
 STATIC_ROOT = BASE_DIR / 'staticfiles'
 
-STATICFILES_STORAGE = (
-    'whitenoise.storage.CompressedManifestStaticFilesStorage'
-)
+# প্রোডাকশনের জন্য Whitenoise Storage
+STATICFILES_STORAGE = 'whitenoise.storage.CompressedManifestStaticFilesStorage'
 
 MEDIA_URL = '/media/'
 MEDIA_ROOT = BASE_DIR / 'media'
@@ -529,12 +544,14 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 CORS_ALLOWED_ORIGINS = [
     "http://localhost:3000",
-    # Frontend URL deploy হওয়ার পরে এখানে add করবে
+    # Frontend URL deploy হওয়ার পরে এখানে add করবেন
 ]
+# যদি প্রোডাকশনে আপাতত সব রিকোয়েস্ট অ্যালাউ করতে চান তাহলে নিচের লাইন আনকমেন্ট করতে পারেন:
+# CORS_ALLOW_ALL_ORIGINS = True
 
 
 # ==========================================
-# DRF
+# DRF & JWT SETTINGS
 # ==========================================
 
 REST_FRAMEWORK = {
@@ -559,8 +576,16 @@ SIMPLE_JWT = {
 }
 
 
+# ==========================================
+# CUSTOM USER MODEL
+# ==========================================
+
 AUTH_USER_MODEL = 'user_api.User'
 
+
+# ==========================================
+# IMPORT EXPORT SETTINGS
+# ==========================================
 
 IMPORT_EXPORT_USE_TRANSACTIONS = True
 IMPORT_EXPORT_SKIP_ADMIN_LOG = False
