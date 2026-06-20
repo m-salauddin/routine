@@ -3,6 +3,9 @@ from django.shortcuts import render
 from django.db import transaction
 from django.http import HttpResponse
 from django.contrib.auth import get_user_model
+from django.core import serializers
+import json
+import tablib
 
 from rest_framework import viewsets, status
 from rest_framework.views import APIView
@@ -10,24 +13,22 @@ from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.parsers import MultiPartParser, FormParser
 
-import tablib
+# --- NEW: Swagger Imports ---
+from drf_yasg.utils import swagger_auto_schema
+from drf_yasg import openapi
 
-from .admin import CourseResource, RoomResource, DepartmentResource, BatchResource, RoutineEntryResource,SemesterResource,UserResource
+from .admin import CourseResource, RoomResource, DepartmentResource, BatchResource, RoutineEntryResource, SemesterResource, UserResource
 from user_api.admin import UserResource
 
 from .models import (
     Department, Semester, Course, TimeSlot, RoutineEntry, Room, 
-    RoomType, RoomSubType, Day,  
-    RoutineEntry, BatchTimeConstraint, SystemBackup
+    RoomType, RoomSubType, Day, BatchTimeConstraint, SystemBackup, Batch
 )
 from .utils import generate_routine_algorithm, rollback_routine_algorithm
 from .serializers import (
     DepartmentSerializer, SemesterSerializer, CourseSerializer, 
     TimeSlotSerializer, RoutineEntrySerializer, RoomSerializer
 )
-
-
-
 
 from user_api.permissions import IsAdminUser
 
@@ -37,10 +38,6 @@ User = get_user_model()
 # ROUTINE CONFLICT CHECKER (Helper Function)
 # ==============================================================================
 def check_routine_conflict(day_id, time_slot_id, room_id, course, exclude_entry_ids=None):
-    """
-    Ei function check korbe oi din, oi time e room, teacher ba batch er kono clash ase kina.
-    exclude_entry_ids e je ID gulo thakbe, taderke check theke baad dibe.
-    """
     base_query = RoutineEntry.objects.filter(
         day_id=day_id, 
         time_slot_id=time_slot_id, 
@@ -48,26 +45,22 @@ def check_routine_conflict(day_id, time_slot_id, room_id, course, exclude_entry_
         is_cancelled=False
     )
     
-    # Ekhane main update ta kora hoyeche (id__in use kore eksathe ekadhik class baad dewa)
     if exclude_entry_ids:
         base_query = base_query.exclude(id__in=exclude_entry_ids)
 
-    # 1. Room Conflict Check
     if base_query.filter(room_id=room_id).exists():
         return "Error: Ei somoy ei Room ti already booked!"
 
-    # 2. Teacher Conflict Check
     if course.teacher and base_query.filter(course__teacher=course.teacher).exists():
         return f"Error: {course.teacher.username} sir er ei somoy onno ekta class ase!"
 
-    # 3. Batch/Semester Conflict Check
     if base_query.filter(course__department=course.department, course__semester=course.semester).exists():
         return f"Error: Ei batch er students der ei somoy already arekta class ase!"
 
     return None
 
 # ==============================================================================
-# Model ViewSets (Updated for Soft Delete: is_active=True)
+# Model ViewSets
 # ==============================================================================
 class DepartmentViewSet(viewsets.ModelViewSet):
     queryset = Department.objects.filter(is_active=True)
@@ -85,7 +78,6 @@ class CourseViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAdminUser]
 
 class TimeSlotViewSet(viewsets.ModelViewSet):
-    # TimeSlot doesn't inherit TimeStampedModel in our current design, so no is_active filter needed
     queryset = TimeSlot.objects.all().order_by('start_time')
     serializer_class = TimeSlotSerializer
     permission_classes = [IsAdminUser]
@@ -102,6 +94,17 @@ class RoomViewSet(viewsets.ModelViewSet):
 class GenerateRoutineView(APIView):
     permission_classes = [IsAdminUser]
     
+    @swagger_auto_schema(
+        request_body=openapi.Schema(
+            type=openapi.TYPE_OBJECT,
+            required=['department_id'],
+            properties={
+                'department_id': openapi.Schema(type=openapi.TYPE_INTEGER, description='Department ID'),
+                'semester_id': openapi.Schema(type=openapi.TYPE_INTEGER, description='Semester ID (Optional)'),
+                'ignore_warnings': openapi.Schema(type=openapi.TYPE_BOOLEAN, description='Ignore warnings? (Optional)'),
+            }
+        )
+    )
     def post(self, request):
         department_id = request.data.get('department_id')
         semester_id = request.data.get('semester_id')
@@ -111,14 +114,10 @@ class GenerateRoutineView(APIView):
             ignore_warnings = ignore_warnings.lower() == 'true'
         
         if not department_id:
-            return Response(
-                {"status": "error", "message": "department_id is required."}, 
-                status=status.HTTP_400_BAD_REQUEST
-            )
+            return Response({"status": "error", "message": "department_id is required."}, status=status.HTTP_400_BAD_REQUEST)
             
         try:
             department = Department.objects.get(id=department_id, is_active=True)
-            
             if semester_id:
                 Semester.objects.get(id=semester_id, is_active=True)
             
@@ -138,25 +137,25 @@ class GenerateRoutineView(APIView):
                 return Response(result, status=status.HTTP_200_OK)
             
         except Department.DoesNotExist:
-            return Response(
-                {"status": "error", "message": "Department not found or is inactive."}, 
-                status=status.HTTP_404_NOT_FOUND
-            )
+            return Response({"status": "error", "message": "Department not found or is inactive."}, status=status.HTTP_404_NOT_FOUND)
         except Semester.DoesNotExist:
-            return Response(
-                {"status": "error", "message": "Semester not found or is inactive."}, 
-                status=status.HTTP_404_NOT_FOUND
-            )
+            return Response({"status": "error", "message": "Semester not found or is inactive."}, status=status.HTTP_404_NOT_FOUND)
         except Exception as e:
-            return Response(
-                {"status": "error", "message": str(e)}, 
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            )
+            return Response({"status": "error", "message": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 class RollbackRoutineView(APIView):
     permission_classes = [IsAdminUser]
     
+    @swagger_auto_schema(
+        request_body=openapi.Schema(
+            type=openapi.TYPE_OBJECT,
+            required=['department_id'],
+            properties={
+                'department_id': openapi.Schema(type=openapi.TYPE_INTEGER, description='Department ID'),
+            }
+        )
+    )
     def post(self, request):
         department_id = request.data.get('department_id')
         if not department_id:
@@ -176,13 +175,19 @@ class RollbackRoutineView(APIView):
 class RoutineListView(APIView):
     permission_classes = [IsAuthenticated]
 
+    @swagger_auto_schema(
+        manual_parameters=[
+            openapi.Parameter('day', openapi.IN_QUERY, description="Day ID", type=openapi.TYPE_INTEGER),
+            openapi.Parameter('department_id', openapi.IN_QUERY, description="Department ID", type=openapi.TYPE_INTEGER),
+            openapi.Parameter('semester_id', openapi.IN_QUERY, description="Semester ID", type=openapi.TYPE_INTEGER),
+        ]
+    )
     def get(self, request):
         user = request.user
         queryset = RoutineEntry.objects.filter(is_active=True)
     
         if user.role == 'TEACHER':
             queryset = queryset.filter(course__teacher=user)
-          
         elif user.role == 'STUDENT':
             if user.department and user.semester:
                 queryset = queryset.filter(
@@ -211,23 +216,29 @@ class RoutineListView(APIView):
 class TeacherCancelClassView(APIView):
     permission_classes = [IsAuthenticated]
     
+    @swagger_auto_schema(
+        request_body=openapi.Schema(
+            type=openapi.TYPE_OBJECT,
+            required=['routine_id', 'cancel_message'],
+            properties={
+                'routine_id': openapi.Schema(type=openapi.TYPE_INTEGER),
+                'cancel_message': openapi.Schema(type=openapi.TYPE_STRING),
+            }
+        )
+    )
     def post(self, request):
         user = request.user
-        
         if getattr(user, 'role', '') != 'TEACHER':
             return Response({"error": "Only teachers can cancel classes."}, status=status.HTTP_403_FORBIDDEN)
 
         routine_id = request.data.get('routine_id')
         cancel_message = request.data.get('cancel_message')
 
-        if not routine_id:
-            return Response({"error": "routine_id is required."}, status=status.HTTP_400_BAD_REQUEST)
-        if not cancel_message:
-            return Response({"error": "cancel_message is required."}, status=status.HTTP_400_BAD_REQUEST)
+        if not routine_id or not cancel_message:
+            return Response({"error": "routine_id and cancel_message are required."}, status=status.HTTP_400_BAD_REQUEST)
 
         try:
             routine = RoutineEntry.objects.get(id=routine_id, is_active=True)
-            
             if routine.course.teacher != user:
                 return Response({"error": "You can only cancel your own classes."}, status=status.HTTP_403_FORBIDDEN)
 
@@ -239,14 +250,22 @@ class TeacherCancelClassView(APIView):
                 "status": "Success",
                 "message": f"Class '{routine.course.course_name}' has been cancelled successfully."
             })
-
         except RoutineEntry.DoesNotExist:
             return Response({"error": "Routine entry not found or inactive."}, status=status.HTTP_404_NOT_FOUND)
 
 
 class ManualRoutineUpdateView(APIView):
-    # permission_classes = [IsAdminUser]
-
+    @swagger_auto_schema(
+        request_body=openapi.Schema(
+            type=openapi.TYPE_OBJECT,
+            required=['day_id', 'time_slot_id'],
+            properties={
+                'day_id': openapi.Schema(type=openapi.TYPE_INTEGER),
+                'time_slot_id': openapi.Schema(type=openapi.TYPE_INTEGER),
+                'room_id': openapi.Schema(type=openapi.TYPE_INTEGER, description="Room ID (Optional)"),
+            }
+        )
+    )
     def put(self, request, entry_id):
         try:
             entry = RoutineEntry.objects.get(id=entry_id)
@@ -271,8 +290,16 @@ class ManualRoutineUpdateView(APIView):
 
 
 class RoutineSwapView(APIView):
-    # permission_classes = [IsAdminUser]
-
+    @swagger_auto_schema(
+        request_body=openapi.Schema(
+            type=openapi.TYPE_OBJECT,
+            required=['entry1_id', 'entry2_id'],
+            properties={
+                'entry1_id': openapi.Schema(type=openapi.TYPE_INTEGER),
+                'entry2_id': openapi.Schema(type=openapi.TYPE_INTEGER),
+            }
+        )
+    )
     def post(self, request):
         entry1_id = request.data.get('entry1_id')
         entry2_id = request.data.get('entry2_id')
@@ -286,53 +313,38 @@ class RoutineSwapView(APIView):
         except RoutineEntry.DoesNotExist:
             return Response({"error": "Kono ekte routine entry pawa jayni."}, status=status.HTTP_404_NOT_FOUND)
 
-        # Cross-Conflict Check (Duijonkei ignore korbo check korar somoy)
         ignore_ids = [entry1.id, entry2.id]
         
-        # LOGIC: Entry 1 jacche Entry 2 er time e, kintu ROOM ar COURSE nijertai thakbe
         conflict1 = check_routine_conflict(
-            day_id=entry2.day.id, 
-            time_slot_id=entry2.time_slot.id, 
-            room_id=entry1.room.id if entry1.room else None, 
-            course=entry1.course, 
-            exclude_entry_ids=ignore_ids
+            day_id=entry2.day.id, time_slot_id=entry2.time_slot.id, 
+            room_id=entry1.room.id if entry1.room else None, course=entry1.course, exclude_entry_ids=ignore_ids
         )
         
-        # LOGIC: Entry 2 jacche Entry 1 er time e, kintu ROOM ar COURSE nijertai thakbe
         conflict2 = check_routine_conflict(
-            day_id=entry1.day.id, 
-            time_slot_id=entry1.time_slot.id, 
-            room_id=entry2.room.id if entry2.room else None, 
-            course=entry2.course, 
-            exclude_entry_ids=ignore_ids
+            day_id=entry1.day.id, time_slot_id=entry1.time_slot.id, 
+            room_id=entry2.room.id if entry2.room else None, course=entry2.course, exclude_entry_ids=ignore_ids
         )
 
         if conflict1 or conflict2:
             return Response({
-                "status": "error", 
-                "message": "Swap kora jabe na, karon conflict ache!",
+                "status": "error", "message": "Swap kora jabe na, karon conflict ache!",
                 "details": {"entry1_issue": conflict1, "entry2_issue": conflict2}
             }, status=status.HTTP_400_BAD_REQUEST)
 
-        # =========================================================
-        # THE MAGIC FIX: Swap ONLY Time & Day (Container), Not Content
-        # =========================================================
         with transaction.atomic():
-            # Shudhu day ar time ta temporary save korlam
             temp_day = entry1.day
             temp_time = entry1.time_slot
             
-            # Entry 1 er vitor Entry 2 er time ar day bosiye dilam
             entry1.day = entry2.day
             entry1.time_slot = entry2.time_slot
             entry1.save()
 
-            # Entry 2 er vitor Entry 1 er ager time ar day bosiye dilam
             entry2.day = temp_day
             entry2.time_slot = temp_time
             entry2.save()
 
-        return Response({"status": "success", "message": "Duti class er shudhu somoy (Time & Day) successfully swap kora hoyeche!"})
+        return Response({"status": "success", "message": "Duti class er shudhu somoy successfully swap kora hoyeche!"})
+
 # ==============================================================================
 # DYNAMIC EXCEL IMPORT & EXPORT APIs (Master API)
 # ==============================================================================
@@ -346,30 +358,26 @@ RESOURCE_MAP = {
     'routine': RoutineEntryResource,
 }
 
-
-
-
-
 class ExcelImportView(APIView):
     permission_classes = [IsAdminUser]
     parser_classes = (MultiPartParser, FormParser)
 
+    @swagger_auto_schema(
+        manual_parameters=[
+            openapi.Parameter('model_name', openapi.IN_FORM, description="Model Name (e.g., user, course)", type=openapi.TYPE_STRING, required=True),
+            openapi.Parameter('file', openapi.IN_FORM, description="Excel File", type=openapi.TYPE_FILE, required=True),
+        ]
+    )
     def post(self, request):
         model_name = request.data.get('model_name')
         excel_file = request.FILES.get('file')
 
         if not model_name or not excel_file:
-            return Response(
-                {"error": "model_name and file are required in form-data."}, 
-                status=status.HTTP_400_BAD_REQUEST
-            )
+            return Response({"error": "model_name and file are required in form-data."}, status=status.HTTP_400_BAD_REQUEST)
 
         model_name = model_name.lower()
         if model_name not in RESOURCE_MAP:
-            return Response(
-                {"error": f"Invalid model_name. Allowed options: {list(RESOURCE_MAP.keys())}"}, 
-                status=status.HTTP_400_BAD_REQUEST
-            )
+            return Response({"error": f"Invalid model_name. Allowed options: {list(RESOURCE_MAP.keys())}"}, status=status.HTTP_400_BAD_REQUEST)
 
         try:
             dataset = tablib.Dataset()
@@ -381,25 +389,15 @@ class ExcelImportView(APIView):
             result = resource.import_data(dataset, dry_run=True)
 
             if result.has_errors() or result.has_validation_errors():
-                error_details = []
-                
-                for error in result.row_errors():
-                    error_details.append(f"Row {error[0]}: {str(error[1].error)}")
-                    
-                for invalid_row in result.invalid_rows:
-                    error_details.append(f"Row {invalid_row.number}: {invalid_row.error_dict}")
+                error_details = [f"Row {error[0]}: {str(error[1].error)}" for error in result.row_errors()]
+                error_details.extend([f"Row {invalid_row.number}: {invalid_row.error_dict}" for invalid_row in result.invalid_rows])
 
                 return Response({
-                    "status": "error", 
-                    "message": "Data validation failed! Please check your Excel file.", 
-                    "details": error_details
+                    "status": "error", "message": "Data validation failed! Please check your Excel file.", "details": error_details
                 }, status=status.HTTP_400_BAD_REQUEST)
 
             resource.import_data(dataset, dry_run=False)
-            return Response({
-                "status": "success", 
-                "message": f"{model_name.capitalize()} data imported successfully!"
-            }, status=status.HTTP_200_OK)
+            return Response({"status": "success", "message": f"{model_name.capitalize()} data imported successfully!"}, status=status.HTTP_200_OK)
 
         except Exception as e:
             return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
@@ -407,81 +405,47 @@ class ExcelImportView(APIView):
 class ExcelExportView(APIView):
     permission_classes = [IsAdminUser]
 
+    @swagger_auto_schema(
+        manual_parameters=[
+            openapi.Parameter('model_name', openapi.IN_QUERY, description="Model Name (e.g., user, course, routine)", type=openapi.TYPE_STRING, required=True),
+        ]
+    )
     def get(self, request):
         model_name = request.query_params.get('model_name')
 
         if not model_name:
-            return Response(
-                {"error": "model_name is required as a query parameter."}, 
-                status=status.HTTP_400_BAD_REQUEST
-            )
+            return Response({"error": "model_name is required as a query parameter."}, status=status.HTTP_400_BAD_REQUEST)
 
         model_name = model_name.lower()
         if model_name not in RESOURCE_MAP:
-            return Response(
-                {"error": f"Invalid model_name. Allowed options: {list(RESOURCE_MAP.keys())}"}, 
-                status=status.HTTP_400_BAD_REQUEST
-            )
+            return Response({"error": f"Invalid model_name. Allowed options: {list(RESOURCE_MAP.keys())}"}, status=status.HTTP_400_BAD_REQUEST)
 
         try:
             resource_class = RESOURCE_MAP[model_name]
             resource = resource_class()
             dataset = resource.export()
 
-            response = HttpResponse(
-                dataset.xlsx, 
-                content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-            )
+            response = HttpResponse(dataset.xlsx, content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
             response['Content-Disposition'] = f'attachment; filename="{model_name}_backup.xlsx"'
             return response
-
         except Exception as e:
             return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-        
-
-# academic/views.py (Add at the bottom)
-
-from django.http import HttpResponse
-from django.core import serializers
-import json
-import tablib
-
-from .models import SystemBackup
 
 # ==============================================================================
 # ENTERPRISE: MULTI-SHEET EXCEL SYNC (All Tables)
 # ==============================================================================
-# academic/views.py er vitor SystemExcelSyncView class ta update korun
-
-from django.db import transaction
-from rest_framework.views import APIView
-from rest_framework.response import Response
-from rest_framework import status
-from rest_framework.permissions import IsAdminUser
-from django.http import HttpResponse
-import tablib
-
-from .admin import (
-    UserResource, DepartmentResource, SemesterResource, 
-    RoomResource, BatchResource, CourseResource, RoutineEntryResource
-)
-
 class SystemExcelSyncView(APIView):
     permission_classes = [IsAdminUser]
+    # File upload er jonne parser add kora holo jeno Swagger a Choose File button ashe
+    parser_classes = (MultiPartParser, FormParser)
 
-    # ==========================================
-    # 1. MULTI-SHEET EXPORT (Ager motoi)
-    # ==========================================
     def get(self, request):
         try:
             databook = tablib.Databook()
             export_sequence = [
-                ('Users', UserResource()), 
-                ('Departments', DepartmentResource()),
-                ('Semesters', SemesterResource()), 
-                ('Rooms', RoomResource()),
-                ('Batches', BatchResource()),
-                ('Courses', CourseResource()),
+                ('Users', UserResource()), ('Departments', DepartmentResource()),
+                ('Semesters', SemesterResource()), ('Rooms', RoomResource()),
+                ('Batches', BatchResource()), ('Courses', CourseResource()),
                 ('Routine', RoutineEntryResource())
             ]
 
@@ -490,93 +454,85 @@ class SystemExcelSyncView(APIView):
                 dataset.title = sheet_name
                 databook.add_sheet(dataset)
 
-            response = HttpResponse(
-                databook.xlsx, 
-                content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-            )
+            response = HttpResponse(databook.xlsx, content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
             response['Content-Disposition'] = 'attachment; filename="Full_System_Backup.xlsx"'
             return response
         except Exception as e:
             return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
-    # ==========================================
-    # 2. MULTI-SHEET IMPORT (Notun Add Holo)
-    # ==========================================
+    @swagger_auto_schema(
+        manual_parameters=[
+            openapi.Parameter('file', openapi.IN_FORM, description="Full System Excel Backup File", type=openapi.TYPE_FILE, required=True),
+        ]
+    )
     def post(self, request):
-        """ Upload single Excel file with multiple sheets to import all data """
         file = request.FILES.get('file')
         if not file:
             return Response({"error": "Excel file upload kora proyojon"}, status=status.HTTP_400_BAD_REQUEST)
 
         try:
-            # Databook e Excel file ta load kora
             databook = tablib.Databook()
             databook.xlsx = file.read()
 
-            # Strict Import Order (Dependency onujayi)
             import_sequence = [
-                ('Users', UserResource()),
-                ('Departments', DepartmentResource()),
-                ('Semesters', SemesterResource()),
-                ('Rooms', RoomResource()),
-                ('Batches', BatchResource()),
-                ('Courses', CourseResource()),
+                ('Users', UserResource()), ('Departments', DepartmentResource()),
+                ('Semesters', SemesterResource()), ('Rooms', RoomResource()),
+                ('Batches', BatchResource()), ('Courses', CourseResource()),
                 ('Routine', RoutineEntryResource())
             ]
 
-            # Atomic transaction jate modhupothe error khele sob ager moto hoye jay
             with transaction.atomic():
                 for sheet_name, resource in import_sequence:
                     try:
-                        # Excel theke sheet er nam onujayi data neya
                         dataset = databook.get_sheet(sheet_name)
                     except (ValueError, KeyError):
-                        # Jodi oi namer sheet na thake tobe skip korbe
                         continue
 
-                    # Data import kora (raise_errors=True deya jate error halei rollback hoy)
                     result = resource.import_data(dataset, dry_run=False, raise_errors=True)
                     if result.has_errors():
                         raise ValueError(f"{sheet_name} sheet er data te somossa ache.")
 
             return Response({"status": "success", "message": "Sob gulo sheet er data safolbhabe import hoyeche!"})
-
         except Exception as e:
             return Response({"error": f"Import fail hoyeche, system rollback kora hoyeche. Reason: {str(e)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
 # ==============================================================================
 # ENTERPRISE: POINT-IN-TIME BACKUP & RESTORE (JSON Snapshots)
 # ==============================================================================
 class SystemSnapshotView(APIView):
     permission_classes = [IsAdminUser]
 
+    @swagger_auto_schema(
+        request_body=openapi.Schema(
+            type=openapi.TYPE_OBJECT,
+            required=['action'],
+            properties={
+                'action': openapi.Schema(type=openapi.TYPE_STRING, description="Action: 'backup' or 'restore'"),
+                'name': openapi.Schema(type=openapi.TYPE_STRING, description="Backup Name (if action is backup)"),
+                'backup_id': openapi.Schema(type=openapi.TYPE_INTEGER, description="Backup ID (if action is restore)"),
+            }
+        )
+    )
     def post(self, request):
-        """ Create a full JSON snapshot of the Academic App """
-        action = request.data.get('action') # 'backup' or 'restore'
+        action = request.data.get('action')
         
         if action == 'backup':
             backup_name = request.data.get('name', 'Auto Backup')
             try:
-                # Get all academic models to backup
                 models_to_backup = [Department, Semester, Batch, Room, Course, RoutineEntry, BatchTimeConstraint]
                 
-                # Serialize all models into a single JSON string
                 full_data = []
                 for model in models_to_backup:
                     qs = model.objects.all()
                     data = json.loads(serializers.serialize('json', qs))
                     full_data.extend(data)
 
-                # Save to database
                 backup_obj = SystemBackup.objects.create(
-                    name=backup_name,
-                    backup_data=json.dumps(full_data),
-                    created_by=request.user
+                    name=backup_name, backup_data=json.dumps(full_data), created_by=request.user
                 )
                 
                 return Response({
-                    "status": "success", 
-                    "message": f"Snapshot '{backup_name}' created successfully!",
-                    "backup_id": backup_obj.id
+                    "status": "success", "message": f"Snapshot '{backup_name}' created successfully!", "backup_id": backup_obj.id
                 })
             except Exception as e:
                 return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
@@ -590,9 +546,7 @@ class SystemSnapshotView(APIView):
                 backup_obj = SystemBackup.objects.get(id=backup_id)
                 objects_to_restore = list(serializers.deserialize("json", backup_obj.backup_data))
                 
-                # ATOMIC RESTORE PIPELINE (Safe Rollback)
                 with transaction.atomic():
-                    # 1. Purge current data in reverse order (to avoid foreign key constraint errors)
                     RoutineEntry.objects.all().delete()
                     BatchTimeConstraint.objects.all().delete()
                     Course.objects.all().delete()
@@ -601,16 +555,14 @@ class SystemSnapshotView(APIView):
                     Semester.objects.all().delete()
                     Department.objects.all().delete()
 
-                    # 2. Re-insert backup data
                     for obj in objects_to_restore:
                         obj.save()
 
+
                 return Response({"status": "success", "message": "System successfully restored to previous state!"})
-            
             except SystemBackup.DoesNotExist:
                 return Response({"error": "Backup not found!"}, status=status.HTTP_404_NOT_FOUND)
             except Exception as e:
-                # If anything fails, transaction.atomic() automatically cancels the deletion and rolls back!
                 return Response({"error": f"Restore failed, system rolled back safely. Reason: {str(e)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
         
         return Response({"error": "Invalid action. Use 'backup' or 'restore'"}, status=status.HTTP_400_BAD_REQUEST)
