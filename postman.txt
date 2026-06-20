@@ -1,0 +1,105 @@
+#All URL
+
+#Admin Url#GET
+http://127.0.0.1:8000/admin/
+
+#Register Url (For All But do not use it)#POST
+http://127.0.0.1:8000/api/register/
+
+#Login Url (For All)#POST
+http://127.0.0.1:8000/api/login/
+
+
+#get token use this Url (For All)#POST
+http://127.0.0.1:8000/api/refresh/
+
+
+#user panel(GET)
+http://127.0.0.1:8000/api/panel/admin/
+
+http://127.0.0.1:8000/api/panel/teacher/
+
+http://127.0.0.1:8000/api/panel/student/
+
+
+#Create Routibe hit this Url(POST)
+http://127.0.0.1:8000/api/academic/generate-routine/
+#view Routine(GET)
+http://127.0.0.1:8000/api/academic/view-routine/
+
+
+
+
+#Only Admin 
+#See and add department(GET,POST)
+http://127.0.0.1:8000/api/academic/departments/
+
+#edit and Delete department(PUT,DELETE)
+http://127.0.0.1:8000/api/academic/departments/<id>/
+
+#See and add Semesters(GET,POST)
+http://127.0.0.1:8000/api/academic/semesters/
+
+
+#edit and Delete Semesters(PUT,DELETE)
+http://127.0.0.1:8000/api/academic/semesters/<id>/
+
+
+#See and add timeslots(GET,POST)
+http://127.0.0.1:8000/api/academic/timeslots/
+
+#edit and Delete timeslots(PUT,DELETE)
+http://127.0.0.1:8000/api/academic/timeslots/<id>/
+
+#See and add courses(GET,POST)
+http://127.0.0.1:8000/api/academic/courses/
+
+#edit and Delete courses(PUT,DELETE)
+http://127.0.0.1:8000/api/academic/courses/<id>/
+
+
+
+#profile Details for all but must be login(GET)
+http://127.0.0.1:8000/api/profile/
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
