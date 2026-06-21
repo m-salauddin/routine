@@ -81,10 +81,56 @@ class TimeSlotSerializer(serializers.ModelSerializer):
         fields = ['id', 'start_time', 'end_time', 'is_lunch_break']
 
 
+# class RoutineEntrySerializer(serializers.ModelSerializer):
+#     day_name = serializers.CharField(source='day.name', read_only=True)
+#     course_name = serializers.CharField(source='course.course_name', read_only=True)
+#     course_code = serializers.CharField(source='course.course_code', read_only=True)
+
+#     teacher_name = serializers.SerializerMethodField()
+#     department_name = serializers.SerializerMethodField()
+#     semester_name = serializers.SerializerMethodField()
+    
+#     room_number = serializers.CharField(source='room.room_number', read_only=True)
+#     start_time = serializers.TimeField(source='time_slot.start_time', read_only=True)
+#     end_time = serializers.TimeField(source='time_slot.end_time', read_only=True)
+#     credits = serializers.IntegerField(source='course.credits', read_only=True)
+
+#     class Meta:
+#         model = RoutineEntry
+#         fields = [
+#             'id', 
+#             'day', 'day_name',
+#             'start_time', 
+#             'end_time',
+#             'course_name', 
+#             'course_code', 
+#             'credits',       
+#             'teacher_name', 
+#             'department_name', 
+#             'semester_name', 
+#             'room_number',
+#             'group_name',
+#             'is_cancelled',   # New field
+#             'cancel_message'  # New field
+#         ]
+
+#     def get_teacher_name(self, obj):
+#         return obj.course.teacher.username if obj.course.teacher else "No Teacher"
+
+#     def get_department_name(self, obj):
+#         return obj.course.department.name if obj.course.department else "N/A"
+
+#     def get_semester_name(self, obj):
+#         return obj.course.semester.name if obj.course.semester else "N/A"
+
+
 class RoutineEntrySerializer(serializers.ModelSerializer):
     day_name = serializers.CharField(source='day.name', read_only=True)
     course_name = serializers.CharField(source='course.course_name', read_only=True)
     course_code = serializers.CharField(source='course.course_code', read_only=True)
+
+    # ১. এই নতুন ফিল্ডটি যোগ করা হলো
+    course_type = serializers.SerializerMethodField()
 
     teacher_name = serializers.SerializerMethodField()
     department_name = serializers.SerializerMethodField()
@@ -99,20 +145,26 @@ class RoutineEntrySerializer(serializers.ModelSerializer):
         model = RoutineEntry
         fields = [
             'id', 
-            'day', 'day_name',
+            'day', 
+            'day_name',
             'start_time', 
             'end_time',
             'course_name', 
             'course_code', 
+            'course_type',    # ২. ফিল্ড লিস্টে নামটা দিয়ে দেওয়া হলো
             'credits',       
             'teacher_name', 
             'department_name', 
             'semester_name', 
             'room_number',
             'group_name',
-            'is_cancelled',   # New field
-            'cancel_message'  # New field
+            'is_cancelled',   
+            'cancel_message'  
         ]
+
+    # ৩. ডেটাবেজ থেকে সেফলি কোর্স টাইপ বের করার ফাংশন
+    def get_course_type(self, obj):
+        return obj.course.course_type.name if obj.course and obj.course.course_type else "N/A"
 
     def get_teacher_name(self, obj):
         return obj.course.teacher.username if obj.course.teacher else "No Teacher"
