@@ -19,9 +19,11 @@ class ScheduleConstraint:
         self.teacher_daily_count = {}
         self.batch_daily_count = {}
         
+        # NEW: Specifically track batch loads per day for even distribution
+        self.batch_day_loads = {}
+        
         self.batch_constraints = batch_constraints_dict
         
-        # EVEN DISTRIBUTION LOGIC
         total_days = max(1, len(days))
         self.teacher_limits = {
             tid: math.ceil(total / total_days) + 1 
@@ -32,7 +34,6 @@ class ScheduleConstraint:
             for bid, total in batch_totals.items()
         }
 
-        # CONTINUOUS CLASS LOGIC
         self.slot_index_map = {slot.id: idx for idx, slot in enumerate(time_slots)}
         self.teacher_schedule_map = {} 
         self.batch_schedule_map = {}   
@@ -55,7 +56,6 @@ class ScheduleConstraint:
     def can_schedule_continuous(self, day_id, start_idx, duration, course):
         MAX_CONTINUOUS = 3
 
-        # Batch Continuous Check
         batch_key = (day_id, course.department.id, course.semester.id)
         batch_occupied = self.batch_schedule_map.get(batch_key, set())
 
@@ -74,7 +74,6 @@ class ScheduleConstraint:
         if left_count + duration + right_count > MAX_CONTINUOUS:
             return False
 
-        # Teacher Continuous Check
         if course.teacher:
             teacher_key = (day_id, course.teacher.id)
             teacher_occupied = self.teacher_schedule_map.get(teacher_key, set())
@@ -98,22 +97,16 @@ class ScheduleConstraint:
 
     def is_conflict(self, day, slot, course, room, group_name=None):
         day_id = day.id
-        
         constraint_type = self.batch_constraints.get((course.department.id, course.semester.id, day_id, slot.id))
         
-        # 1. User-defined constraints verification
         if constraint_type == 'CLASS_OFF':
             return True
         if slot.is_lunch_break and constraint_type != 'FORCE_ALLOW_LUNCH_CLASS':
             return True
-
-        # 2. Resource availability verification
         if course.teacher and (day_id, slot.id, course.teacher.id) in self.teacher_occupied:
             return True
-
         if room and (day_id, slot.id, room.id) in self.room_occupied:
             return True
-
         if (day_id, slot.id, course.department.id, course.semester.id) in self.batch_occupied:
             return True
 
@@ -149,6 +142,9 @@ class ScheduleConstraint:
         self.course_daily_tracker.add((course.id, group_name, day_id))
         self.day_loads[day_id] += 1
         self.batch_daily_count[(course.department.id, course.semester.id, day_id)] = self.batch_daily_count.get((course.department.id, course.semester.id, day_id), 0) + 1
+        
+        # Load balancing tracker increment
+        self.batch_day_loads[(course.department.id, course.semester.id, day_id)] = self.batch_day_loads.get((course.department.id, course.semester.id, day_id), 0) + 1
 
         b_key = (day_id, course.department.id, course.semester.id)
         if b_key not in self.batch_schedule_map:
@@ -236,22 +232,16 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
 
         days = list(Day.objects.all().order_by('order'))
         time_slots = list(TimeSlot.objects.all().order_by('start_time'))
+        total_slots = len(time_slots)
         all_active_rooms = list(Room.objects.filter(is_active=True))
 
-        # ======================================================================
-        # SENIOR FIX: Advanced Constraint Resolution Logic (Safe Dictionary)
-        # ======================================================================
         constraints_qs = BatchTimeConstraint.objects.filter(is_active=True)
         batch_constraints_dict = {}
-        
         for c in constraints_qs:
             key = (c.department_id, c.semester_id, c.day_id, c.time_slot_id)
-            # Priority Handling: If a 'CLASS_OFF' rule exists for this key, it strictly 
-            # overrides any other permissive rules.
             if key in batch_constraints_dict and batch_constraints_dict[key] == 'CLASS_OFF':
                 continue
             batch_constraints_dict[key] = c.constraint_type
-        # ======================================================================
 
         sorted_sessions = prepare_prioritized_sessions(courses_to_schedule)
         teacher_totals = {}
@@ -295,7 +285,13 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
                 group_assigned = False
                 sorted_days = allowed_days
                 if not course.fixed_day:
-                    sorted_days = sorted(allowed_days, key=lambda d: constraints.day_loads[d.id])
+                    # FIX 1: LOAD BALANCING
+                    # Sort days by how many classes this specific batch already has on that day
+                    # This ensures an even distribution of classes across the week.
+                    sorted_days = sorted(
+                        allowed_days, 
+                        key=lambda d: constraints.batch_day_loads.get((course.department.id, course.semester.id, d.id), 0)
+                    )
 
                 for day in sorted_days:
                     if group_assigned: break
@@ -303,23 +299,47 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
                     if not constraints.can_schedule_daily(day.id, course, duration):
                         continue
 
-                    # Magnetic Slot Selection Logic
                     b_key = (day.id, course.department.id, course.semester.id)
                     occupied_slots = constraints.batch_schedule_map.get(b_key, set())
                     
                     possible_starts = list(range(len(time_slots) - duration + 1))
                     
-                    def get_gap_score(start_idx):
-                        if not occupied_slots:
-                            return start_idx
-                        min_dist = float('inf')
-                        for o in occupied_slots:
-                            dist = start_idx - o - 1 if o < start_idx else o - (start_idx + duration)
-                            if dist < 0: dist = 0 
-                            if dist < min_dist: min_dist = dist
-                        return min_dist
+                    # FIX 2 & 3: HEURISTIC PENALTY SCORING (First/Last Slot & Gap Minimization)
+                    def calculate_slot_score(start_idx):
+                        score = 0
+                        
+                        # Apply heavy penalty to first and last slots (Avoid them)
+                        if start_idx == 0:
+                            score += 100
+                        if start_idx + duration == total_slots:
+                            score += 100
+                            
+                        # Slight preference for early-mid day (2nd/3rd slot) over late afternoon
+                        score += (start_idx * 2)
 
-                    possible_starts.sort(key=lambda idx: (get_gap_score(idx), idx))
+                        # Magnetic Gap Logic: Minimize gaps between classes
+                        if occupied_slots:
+                            min_dist = float('inf')
+                            for o in occupied_slots:
+                                if o < start_idx:
+                                    dist = start_idx - o - 1
+                                else:
+                                    dist = o - (start_idx + duration)
+                                
+                                if dist < 0: dist = 0 
+                                if dist < min_dist: min_dist = dist
+                            
+                            # If placed right next to an existing class, give a massive bonus
+                            if min_dist == 0:
+                                score -= 50
+                            else:
+                                # Penalize gaps (bigger gap = bigger penalty)
+                                score += (min_dist * 20)
+                        
+                        return score
+
+                    # Sort slots based on the lowest penalty score
+                    possible_starts.sort(key=lambda idx: calculate_slot_score(idx))
 
                     for i in possible_starts:
                         if group_assigned: break
@@ -347,7 +367,7 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
                             group_assigned = True
                             scheduled_count += 1
 
-                # FALLBACK (In case continuous rules or daily limit restrict too much)
+                # FALLBACK LOOP
                 if not group_assigned and not course.fixed_day:
                     for day in sorted_days:
                         if group_assigned: break
@@ -356,16 +376,23 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
                         occupied_slots = constraints.batch_schedule_map.get(b_key, set())
                         possible_starts = list(range(len(time_slots) - duration + 1))
                         
-                        def get_gap_score_fallback(start_idx):
-                            if not occupied_slots: return start_idx
-                            min_dist = float('inf')
-                            for o in occupied_slots:
-                                dist = start_idx - o - 1 if o < start_idx else o - (start_idx + duration)
-                                if dist < 0: dist = 0
-                                if dist < min_dist: min_dist = dist
-                            return min_dist
+                        def calculate_fallback_score(start_idx):
+                            score = 0
+                            if start_idx == 0: score += 100
+                            if start_idx + duration == total_slots: score += 100
+                            
+                            if occupied_slots:
+                                min_dist = float('inf')
+                                for o in occupied_slots:
+                                    dist = start_idx - o - 1 if o < start_idx else o - (start_idx + duration)
+                                    if dist < 0: dist = 0
+                                    if dist < min_dist: min_dist = dist
+                                
+                                if min_dist == 0: score -= 50
+                                else: score += (min_dist * 20)
+                            return score
 
-                        possible_starts.sort(key=lambda idx: (get_gap_score_fallback(idx), idx))
+                        possible_starts.sort(key=lambda idx: calculate_fallback_score(idx))
 
                         for i in possible_starts:
                             if group_assigned: break
