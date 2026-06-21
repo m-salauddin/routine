@@ -77,7 +77,8 @@ class CourseSerializer(serializers.ModelSerializer):
 class TimeSlotSerializer(serializers.ModelSerializer):
     class Meta:
         model = TimeSlot
-        fields = ['id', 'start_time', 'end_time']
+        # Ekhane 'is_lunch_break' field ta notun kore add kora holo
+        fields = ['id', 'start_time', 'end_time', 'is_lunch_break']
 
 
 class RoutineEntrySerializer(serializers.ModelSerializer):
