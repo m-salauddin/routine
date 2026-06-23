@@ -6,6 +6,7 @@ from django.contrib.auth import get_user_model
 from django.core import serializers
 import json
 import tablib
+import datetime
 
 from rest_framework import viewsets, status
 from rest_framework.views import APIView
@@ -13,7 +14,6 @@ from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.parsers import MultiPartParser, FormParser
 
-# --- NEW: Swagger Imports ---
 from drf_yasg.utils import swagger_auto_schema
 from drf_yasg import openapi
 
@@ -22,7 +22,8 @@ from user_api.admin import UserResource
 
 from .models import (
     Department, Semester, Course, TimeSlot, RoutineEntry, Room, 
-    RoomType, RoomSubType, Day, BatchTimeConstraint, SystemBackup, Batch
+    RoomType, RoomSubType, Day, BatchTimeConstraint, SystemBackup, Batch,
+    TemporarySwapRequest
 )
 from .utils import generate_routine_algorithm, rollback_routine_algorithm
 from .serializers import (
@@ -89,21 +90,147 @@ class RoomViewSet(viewsets.ModelViewSet):
 
 
 # ==============================================================================
+# TEMPORARY SWAP REQUEST MANAGEMENT
+# ==============================================================================
+class TeacherSwapRequestView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    @swagger_auto_schema(
+        tags=['3. Teacher Operations'],
+        operation_description="**[TEACHER ONLY]** Request a temporary class swap (PROXY or MUTUAL).",
+        request_body=openapi.Schema(
+            type=openapi.TYPE_OBJECT,
+            required=['swap_type', 'target_teacher_id', 'requester_routine_id', 'swap_date'],
+            properties={
+                'swap_type': openapi.Schema(type=openapi.TYPE_STRING, description="'PROXY' or 'MUTUAL'", default='PROXY'),
+                'target_teacher_id': openapi.Schema(type=openapi.TYPE_INTEGER, description="ID of the teacher you are requesting", default=1),
+                'requester_routine_id': openapi.Schema(type=openapi.TYPE_INTEGER, description="Your routine ID", default=10),
+                'target_routine_id': openapi.Schema(type=openapi.TYPE_INTEGER, description="Target routine ID (Required only for MUTUAL)", default=15),
+                'swap_date': openapi.Schema(type=openapi.TYPE_STRING, format=openapi.FORMAT_DATE, description="Format: YYYY-MM-DD", default="2026-06-25"),
+                'reason': openapi.Schema(type=openapi.TYPE_STRING, description="Reason for the swap", default="Medical Emergency"),
+            }
+        ),
+        responses={200: "Success", 400: "Bad Request (Conflict/Errors)", 403: "Forbidden"}
+    )
+    def post(self, request):
+        user = request.user
+        if getattr(user, 'role', '') != 'TEACHER':
+            return Response({"error": "Only teachers can request swaps."}, status=status.HTTP_403_FORBIDDEN)
+
+        swap_type = request.data.get('swap_type')
+        target_teacher_id = request.data.get('target_teacher_id')
+        requester_routine_id = request.data.get('requester_routine_id')
+        target_routine_id = request.data.get('target_routine_id')
+        swap_date_str = request.data.get('swap_date')
+        reason = request.data.get('reason', '')
+
+        try:
+            swap_date = datetime.datetime.strptime(swap_date_str, '%Y-%m-%d').date()
+            req_routine = RoutineEntry.objects.get(id=requester_routine_id, is_active=True)
+            target_teacher = User.objects.get(id=target_teacher_id, role='TEACHER')
+
+            if req_routine.course.teacher != user:
+                return Response({"error": "You can only swap your own classes."}, status=status.HTTP_403_FORBIDDEN)
+
+            if swap_type == 'PROXY':
+                conflict = RoutineEntry.objects.filter(
+                    day=req_routine.day,
+                    time_slot=req_routine.time_slot,
+                    course__teacher=target_teacher,
+                    is_active=True
+                ).exists()
+                if conflict:
+                    return Response({"error": f"{target_teacher.username} already has a class at this time!"}, status=status.HTTP_400_BAD_REQUEST)
+
+                req = TemporarySwapRequest.objects.create(
+                    swap_type='PROXY', requester=user, target_teacher=target_teacher,
+                    requester_routine=req_routine, swap_date=swap_date, reason=reason
+                )
+
+            elif swap_type == 'MUTUAL':
+                if not target_routine_id:
+                    return Response({"error": "target_routine_id is required for MUTUAL swap."}, status=status.HTTP_400_BAD_REQUEST)
+
+                tgt_routine = RoutineEntry.objects.get(id=target_routine_id, is_active=True)
+                if tgt_routine.course.teacher != target_teacher:
+                    return Response({"error": "Target routine does not belong to the target teacher."}, status=status.HTTP_400_BAD_REQUEST)
+
+                conflict1 = RoutineEntry.objects.filter(
+                    day=tgt_routine.day, time_slot=tgt_routine.time_slot, course__teacher=user, is_active=True
+                ).exists()
+                conflict2 = RoutineEntry.objects.filter(
+                    day=req_routine.day, time_slot=req_routine.time_slot, course__teacher=target_teacher, is_active=True
+                ).exists()
+
+                if conflict1 or conflict2:
+                    return Response({"error": "Mutual swap causes a timetable conflict for one or both teachers."}, status=status.HTTP_400_BAD_REQUEST)
+
+                req = TemporarySwapRequest.objects.create(
+                    swap_type='MUTUAL', requester=user, target_teacher=target_teacher,
+                    requester_routine=req_routine, target_routine=tgt_routine,
+                    swap_date=swap_date, reason=reason
+                )
+            else:
+                return Response({"error": "Invalid swap_type."}, status=status.HTTP_400_BAD_REQUEST)
+
+            return Response({"status": "Success", "message": "Swap request sent successfully!", "request_id": req.id})
+
+        except Exception as e:
+            return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    @swagger_auto_schema(
+        tags=['3. Teacher Operations'],
+        operation_description="**[TEACHER ONLY]** Accept or Reject a pending swap request.",
+        request_body=openapi.Schema(
+            type=openapi.TYPE_OBJECT,
+            required=['request_id', 'action'],
+            properties={
+                'request_id': openapi.Schema(type=openapi.TYPE_INTEGER, description="ID of the swap request", default=1),
+                'action': openapi.Schema(type=openapi.TYPE_STRING, description="'ACCEPT' or 'REJECT'", default="ACCEPT"),
+            }
+        ),
+        responses={200: "Success", 400: "Bad Request", 404: "Not Found"}
+    )
+    def put(self, request):
+        user = request.user
+        request_id = request.data.get('request_id')
+        action = request.data.get('action')
+
+        try:
+            swap_req = TemporarySwapRequest.objects.get(id=request_id, target_teacher=user, status='PENDING')
+            if action == 'ACCEPT':
+                swap_req.status = 'ACCEPTED'
+                swap_req.save()
+                return Response({"status": "Success", "message": "Swap request ACCEPTED."})
+            elif action == 'REJECT':
+                swap_req.status = 'REJECTED'
+                swap_req.save()
+                return Response({"status": "Success", "message": "Swap request REJECTED."})
+            else:
+                return Response({"error": "Invalid action."}, status=status.HTTP_400_BAD_REQUEST)
+        except TemporarySwapRequest.DoesNotExist:
+            return Response({"error": "Pending request not found or you are not authorized."}, status=status.HTTP_404_NOT_FOUND)
+
+
+# ==============================================================================
 # ROUTINE GENERATION & MANAGEMENT APIs
 # ==============================================================================
 class GenerateRoutineView(APIView):
     permission_classes = [IsAdminUser]
     
     @swagger_auto_schema(
+        tags=['1. Routine Engine'],
+        operation_description="**[ADMIN ONLY]** Automatically generate a completely new conflict-free routine for a department/semester.",
         request_body=openapi.Schema(
             type=openapi.TYPE_OBJECT,
             required=['department_id'],
             properties={
-                'department_id': openapi.Schema(type=openapi.TYPE_INTEGER, description='Department ID'),
-                'semester_id': openapi.Schema(type=openapi.TYPE_INTEGER, description='Semester ID (Optional)'),
-                'ignore_warnings': openapi.Schema(type=openapi.TYPE_BOOLEAN, description='Ignore warnings? (Optional)'),
+                'department_id': openapi.Schema(type=openapi.TYPE_INTEGER, description='Department ID', default=1),
+                'semester_id': openapi.Schema(type=openapi.TYPE_INTEGER, description='Semester ID (Optional)', default=1),
+                'ignore_warnings': openapi.Schema(type=openapi.TYPE_BOOLEAN, description='Ignore warnings to save partial routine?', default=False),
             }
-        )
+        ),
+        responses={200: "Success", 409: "Warning (Partial Schedule)", 403: "Forbidden"}
     )
     def post(self, request):
         department_id = request.data.get('department_id')
@@ -148,13 +275,16 @@ class RollbackRoutineView(APIView):
     permission_classes = [IsAdminUser]
     
     @swagger_auto_schema(
+        tags=['1. Routine Engine'],
+        operation_description="**[ADMIN ONLY]** Restore the routine to its previous state before the last generation.",
         request_body=openapi.Schema(
             type=openapi.TYPE_OBJECT,
             required=['department_id'],
             properties={
-                'department_id': openapi.Schema(type=openapi.TYPE_INTEGER, description='Department ID'),
+                'department_id': openapi.Schema(type=openapi.TYPE_INTEGER, description='Department ID', default=1),
             }
-        )
+        ),
+        responses={200: "Success", 400: "Error/No Backup"}
     )
     def post(self, request):
         department_id = request.data.get('department_id')
@@ -176,10 +306,13 @@ class RoutineListView(APIView):
     permission_classes = [IsAuthenticated]
 
     @swagger_auto_schema(
+        tags=['1. Routine Engine'],
+        operation_description="**[ALL USERS]** Get the routine. Output is role-specific (Teachers see their classes, Students see their batch). Automatically applies Accepted Temporary Swaps based on reference_date.",
         manual_parameters=[
-            openapi.Parameter('day', openapi.IN_QUERY, description="Day ID", type=openapi.TYPE_INTEGER),
-            openapi.Parameter('department_id', openapi.IN_QUERY, description="Department ID", type=openapi.TYPE_INTEGER),
-            openapi.Parameter('semester_id', openapi.IN_QUERY, description="Semester ID", type=openapi.TYPE_INTEGER),
+            openapi.Parameter('day', openapi.IN_QUERY, description="Filter by Day ID", type=openapi.TYPE_INTEGER),
+            openapi.Parameter('department_id', openapi.IN_QUERY, description="Filter by Department ID", type=openapi.TYPE_INTEGER),
+            openapi.Parameter('semester_id', openapi.IN_QUERY, description="Filter by Semester ID", type=openapi.TYPE_INTEGER),
+            openapi.Parameter('reference_date', openapi.IN_QUERY, description="Target Date (YYYY-MM-DD). Defaults to today if blank.", type=openapi.TYPE_STRING),
         ]
     )
     def get(self, request):
@@ -210,21 +343,99 @@ class RoutineListView(APIView):
 
         queryset = queryset.order_by('day__order', 'time_slot__start_time')
         serializer = RoutineEntrySerializer(queryset, many=True)
-        return Response(serializer.data)
-    
+        data = serializer.data
+
+        # ======================================================================
+        # THE MAGIC OVERLAY: DYNAMIC DATE PROJECTION & SWAP INJECTION
+        # ======================================================================
+        reference_date_str = request.query_params.get('reference_date')
+        if reference_date_str:
+            try:
+                ref_date = datetime.datetime.strptime(reference_date_str, '%Y-%m-%d').date()
+            except ValueError:
+                ref_date = datetime.date.today()
+        else:
+            ref_date = datetime.date.today()
+
+        idx = (ref_date.weekday() + 1) % 7 
+        sunday_date = ref_date - datetime.timedelta(days=idx)
+
+        days_qs = Day.objects.all().order_by('order')
+        day_date_map = {}
+        for i, d in enumerate(days_qs):
+            day_date_map[d.name] = sunday_date + datetime.timedelta(days=i)
+
+        week_start = sunday_date
+        week_end = sunday_date + datetime.timedelta(days=6)
+
+        accepted_swaps = TemporarySwapRequest.objects.filter(
+            status='ACCEPTED',
+            swap_date__range=[week_start, week_end]
+        ).select_related('requester_routine', 'target_routine', 'target_teacher')
+
+        proxy_swaps = {s.requester_routine_id: s for s in accepted_swaps if s.swap_type == 'PROXY'}
+        mutual_swaps = {}
+        for s in accepted_swaps:
+            if s.swap_type == 'MUTUAL':
+                mutual_swaps[s.requester_routine_id] = s
+                if s.target_routine_id:
+                    mutual_swaps[s.target_routine_id] = s
+
+        modified_data = []
+        for item in data:
+            entry_id = item['id']
+            day_name = item['day_name']
+            exact_date = day_date_map.get(day_name)
+
+            item['date'] = exact_date.strftime('%Y-%m-%d') if exact_date else None
+            item['is_temporary_proxy'] = False
+            item['is_temporary_mutual'] = False
+
+            if entry_id in proxy_swaps and proxy_swaps[entry_id].swap_date == exact_date:
+                item['teacher_name'] = proxy_swaps[entry_id].target_teacher.username
+                item['is_temporary_proxy'] = True
+
+            elif entry_id in mutual_swaps and mutual_swaps[entry_id].swap_date == exact_date:
+                swap = mutual_swaps[entry_id]
+                
+                if swap.requester_routine_id == entry_id and swap.target_routine:
+                    t_routine = swap.target_routine
+                    item['day'] = t_routine.day.id
+                    item['day_name'] = t_routine.day.name
+                    item['start_time'] = t_routine.time_slot.start_time.strftime('%H:%M:%S')
+                    item['end_time'] = t_routine.time_slot.end_time.strftime('%H:%M:%S')
+                    item['room_number'] = t_routine.room.room_number if t_routine.room else "N/A"
+                    item['is_temporary_mutual'] = True
+                    
+                elif swap.target_routine_id == entry_id:
+                    r_routine = swap.requester_routine
+                    item['day'] = r_routine.day.id
+                    item['day_name'] = r_routine.day.name
+                    item['start_time'] = r_routine.time_slot.start_time.strftime('%H:%M:%S')
+                    item['end_time'] = r_routine.time_slot.end_time.strftime('%H:%M:%S')
+                    item['room_number'] = r_routine.room.room_number if r_routine.room else "N/A"
+                    item['is_temporary_mutual'] = True
+
+            modified_data.append(item)
+
+        return Response(modified_data)
+
 
 class TeacherCancelClassView(APIView):
     permission_classes = [IsAuthenticated]
     
     @swagger_auto_schema(
+        tags=['3. Teacher Operations'],
+        operation_description="**[TEACHER ONLY]** Send a cancellation notice to students for a specific class.",
         request_body=openapi.Schema(
             type=openapi.TYPE_OBJECT,
             required=['routine_id', 'cancel_message'],
             properties={
-                'routine_id': openapi.Schema(type=openapi.TYPE_INTEGER),
-                'cancel_message': openapi.Schema(type=openapi.TYPE_STRING),
+                'routine_id': openapi.Schema(type=openapi.TYPE_INTEGER, default=1),
+                'cancel_message': openapi.Schema(type=openapi.TYPE_STRING, default="Class cancelled due to meeting."),
             }
-        )
+        ),
+        responses={200: "Success", 403: "Forbidden"}
     )
     def post(self, request):
         user = request.user
@@ -256,15 +467,18 @@ class TeacherCancelClassView(APIView):
 
 class ManualRoutineUpdateView(APIView):
     @swagger_auto_schema(
+        tags=['2. Manual Operations'],
+        operation_description="**[ADMIN ONLY]** Manually update a specific class to a new day, time, or room.",
         request_body=openapi.Schema(
             type=openapi.TYPE_OBJECT,
             required=['day_id', 'time_slot_id'],
             properties={
-                'day_id': openapi.Schema(type=openapi.TYPE_INTEGER),
-                'time_slot_id': openapi.Schema(type=openapi.TYPE_INTEGER),
-                'room_id': openapi.Schema(type=openapi.TYPE_INTEGER, description="Room ID (Optional)"),
+                'day_id': openapi.Schema(type=openapi.TYPE_INTEGER, default=1),
+                'time_slot_id': openapi.Schema(type=openapi.TYPE_INTEGER, default=2),
+                'room_id': openapi.Schema(type=openapi.TYPE_INTEGER, description="Room ID (Optional)", default=3),
             }
-        )
+        ),
+        responses={200: "Success", 400: "Conflict Error"}
     )
     def put(self, request, entry_id):
         try:
@@ -291,14 +505,17 @@ class ManualRoutineUpdateView(APIView):
 
 class RoutineSwapView(APIView):
     @swagger_auto_schema(
+        tags=['2. Manual Operations'],
+        operation_description="**[ADMIN ONLY]** Permanently swap the time slots of two classes in the master database.",
         request_body=openapi.Schema(
             type=openapi.TYPE_OBJECT,
             required=['entry1_id', 'entry2_id'],
             properties={
-                'entry1_id': openapi.Schema(type=openapi.TYPE_INTEGER),
-                'entry2_id': openapi.Schema(type=openapi.TYPE_INTEGER),
+                'entry1_id': openapi.Schema(type=openapi.TYPE_INTEGER, default=1),
+                'entry2_id': openapi.Schema(type=openapi.TYPE_INTEGER, default=2),
             }
-        )
+        ),
+        responses={200: "Success", 400: "Conflict Error"}
     )
     def post(self, request):
         entry1_id = request.data.get('entry1_id')
@@ -363,6 +580,8 @@ class ExcelImportView(APIView):
     parser_classes = (MultiPartParser, FormParser)
 
     @swagger_auto_schema(
+        tags=['4. Enterprise Operations'],
+        operation_description="**[ADMIN ONLY]** Import data for a specific model using an Excel file.",
         manual_parameters=[
             openapi.Parameter('model_name', openapi.IN_FORM, description="Model Name (e.g., user, course)", type=openapi.TYPE_STRING, required=True),
             openapi.Parameter('file', openapi.IN_FORM, description="Excel File", type=openapi.TYPE_FILE, required=True),
@@ -406,6 +625,8 @@ class ExcelExportView(APIView):
     permission_classes = [IsAdminUser]
 
     @swagger_auto_schema(
+        tags=['4. Enterprise Operations'],
+        operation_description="**[ADMIN ONLY]** Export data of a specific model to an Excel file.",
         manual_parameters=[
             openapi.Parameter('model_name', openapi.IN_QUERY, description="Model Name (e.g., user, course, routine)", type=openapi.TYPE_STRING, required=True),
         ]
@@ -436,9 +657,12 @@ class ExcelExportView(APIView):
 # ==============================================================================
 class SystemExcelSyncView(APIView):
     permission_classes = [IsAdminUser]
-    # File upload er jonne parser add kora holo jeno Swagger a Choose File button ashe
     parser_classes = (MultiPartParser, FormParser)
 
+    @swagger_auto_schema(
+        tags=['4. Enterprise Operations'],
+        operation_description="**[ADMIN ONLY]** Download a Multi-sheet Excel file containing the entire database.",
+    )
     def get(self, request):
         try:
             databook = tablib.Databook()
@@ -461,6 +685,8 @@ class SystemExcelSyncView(APIView):
             return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
     @swagger_auto_schema(
+        tags=['4. Enterprise Operations'],
+        operation_description="**[ADMIN ONLY]** Upload a Multi-sheet Excel file to sync the entire database sequentially.",
         manual_parameters=[
             openapi.Parameter('file', openapi.IN_FORM, description="Full System Excel Backup File", type=openapi.TYPE_FILE, required=True),
         ]
@@ -503,15 +729,18 @@ class SystemSnapshotView(APIView):
     permission_classes = [IsAdminUser]
 
     @swagger_auto_schema(
+        tags=['4. Enterprise Operations'],
+        operation_description="**[ADMIN ONLY]** Create a JSON snapshot of the system or restore from a previous snapshot.",
         request_body=openapi.Schema(
             type=openapi.TYPE_OBJECT,
             required=['action'],
             properties={
-                'action': openapi.Schema(type=openapi.TYPE_STRING, description="Action: 'backup' or 'restore'"),
-                'name': openapi.Schema(type=openapi.TYPE_STRING, description="Backup Name (if action is backup)"),
+                'action': openapi.Schema(type=openapi.TYPE_STRING, description="'backup' or 'restore'", default='backup'),
+                'name': openapi.Schema(type=openapi.TYPE_STRING, description="Backup Name (e.g., Before Finals)", default='System Auto Backup'),
                 'backup_id': openapi.Schema(type=openapi.TYPE_INTEGER, description="Backup ID (if action is restore)"),
             }
-        )
+        ),
+        responses={200: "Success", 400: "Bad Request", 404: "Not Found"}
     )
     def post(self, request):
         action = request.data.get('action')
@@ -557,7 +786,6 @@ class SystemSnapshotView(APIView):
 
                     for obj in objects_to_restore:
                         obj.save()
-
 
                 return Response({"status": "success", "message": "System successfully restored to previous state!"})
             except SystemBackup.DoesNotExist:

@@ -248,3 +248,44 @@ class SystemBackup(models.Model):
 
     def __str__(self):
         return f"{self.name} - {self.created_at.strftime('%Y-%m-%d %H:%M')}"
+    
+
+
+# ==============================================================================
+# 5. TEMPORARY SWAP & PROXY MANAGEMENT
+# ==============================================================================
+class TemporarySwapRequest(TimeStampedModel):
+    SWAP_TYPE_CHOICES = (
+        ('PROXY', 'Proxy / Substitution (Teacher B takes Teacher A\'s class)'),
+        ('MUTUAL', 'Mutual Time Swap (Exchange of class times)'),
+    )
+    STATUS_CHOICES = (
+        ('PENDING', 'Pending'),
+        ('ACCEPTED', 'Accepted'),
+        ('REJECTED', 'Rejected'),
+        ('CANCELLED', 'Cancelled by Requester'),
+    )
+
+    swap_type = models.CharField(max_length=10, choices=SWAP_TYPE_CHOICES, default='PROXY')
+    
+    # Teachers involved
+    requester = models.ForeignKey(settings.AUTH_USER_MODEL, related_name='swap_requests_sent', on_delete=models.CASCADE)
+    target_teacher = models.ForeignKey(settings.AUTH_USER_MODEL, related_name='swap_requests_received', on_delete=models.CASCADE)
+    
+    # Routines involved
+    requester_routine = models.ForeignKey(RoutineEntry, related_name='swap_requests_as_requester', on_delete=models.CASCADE)
+    target_routine = models.ForeignKey(
+        RoutineEntry, related_name='swap_requests_as_target', 
+        on_delete=models.CASCADE, null=True, blank=True,
+        help_text="Only required if swap_type is MUTUAL"
+    )
+    
+    swap_date = models.DateField(help_text="The specific date for this temporary swap")
+    status = models.CharField(max_length=10, choices=STATUS_CHOICES, default='PENDING')
+    reason = models.TextField(null=True, blank=True, help_text="Reason for the swap request")
+
+    class Meta:
+        ordering = ['-swap_date', '-created_at']
+
+    def __str__(self):
+        return f"{self.get_swap_type_display()} | {self.requester.username} -> {self.target_teacher.username} | Date: {self.swap_date} | {self.status}"

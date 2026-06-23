@@ -2,7 +2,7 @@
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 from .views import (
-    DepartmentViewSet, SemesterViewSet, CourseViewSet, SystemSnapshotView, 
+    DepartmentViewSet, SemesterViewSet, CourseViewSet, SystemSnapshotView, TeacherSwapRequestView, 
     TimeSlotViewSet, RoomViewSet, GenerateRoutineView, 
     RoutineListView, RollbackRoutineView, TeacherCancelClassView ,ExcelImportView, ExcelExportView,
     ManualRoutineUpdateView, RoutineSwapView,SystemExcelSyncView,
@@ -31,6 +31,7 @@ urlpatterns = [
     path('routine/swap/', RoutineSwapView.as_view(), name='routine-swap'),
     path('sync/excel/', SystemExcelSyncView.as_view(), name='system-excel-sync'),
     path('sync/snapshot/', SystemSnapshotView.as_view(), name='system-snapshot'),
+    path('swap-request/', TeacherSwapRequestView.as_view(), name='swap-request'),
    
  
 ]
