@@ -129,7 +129,7 @@ class RoutineEntrySerializer(serializers.ModelSerializer):
     course_name = serializers.CharField(source='course.course_name', read_only=True)
     course_code = serializers.CharField(source='course.course_code', read_only=True)
 
-    # ১. এই নতুন ফিল্ডটি যোগ করা হলো
+   
     course_type = serializers.SerializerMethodField()
 
     teacher_name = serializers.SerializerMethodField()
@@ -151,7 +151,7 @@ class RoutineEntrySerializer(serializers.ModelSerializer):
             'end_time',
             'course_name', 
             'course_code', 
-            'course_type',    # ২. ফিল্ড লিস্টে নামটা দিয়ে দেওয়া হলো
+            'course_type',    
             'credits',       
             'teacher_name', 
             'department_name', 
@@ -162,7 +162,7 @@ class RoutineEntrySerializer(serializers.ModelSerializer):
             'cancel_message'  
         ]
 
-    # ৩. ডেটাবেজ থেকে সেফলি কোর্স টাইপ বের করার ফাংশন
+   
     def get_course_type(self, obj):
         return obj.course.course_type.name if obj.course and obj.course.course_type else "N/A"
 

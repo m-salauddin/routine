@@ -20,12 +20,12 @@ from django.urls import path, include
 from user_api.views import first_page
 from django.contrib.staticfiles.urls import staticfiles_urlpatterns
 
-# Swagger-এর জন্য নতুন ইমপোর্টগুলো
+
 from rest_framework import permissions
 from drf_yasg.views import get_schema_view
 from drf_yasg import openapi
 
-# Swagger কনফিগারেশন
+
 schema_view = get_schema_view(
    openapi.Info(
       title="Routine Generator API",
@@ -45,7 +45,7 @@ urlpatterns = [
     
     path('api/academic/', include('academic.urls')), 
     
-    # Swagger-এর URL নতুন যুক্ত করা হলো
+   
     path('swagger/', schema_view.with_ui('swagger', cache_timeout=0), name='schema-swagger-ui'),
 ]
 

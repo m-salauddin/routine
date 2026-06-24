@@ -127,7 +127,6 @@
 
 
 
-# # নিচের লাইনটি নিশ্চিত করুন যে আপনার রেন্ডারের ডাটাবেস ইউআরএল এনভায়রনমেন্ট ভেরিয়েবল থেকে রিড করছে
 # DATABASE_URL = os.environ.get("DATABASE_URL")
 
 # DATABASES = {
@@ -387,7 +386,7 @@
 from pathlib import Path
 from datetime import timedelta
 import os
-import dj_database_url # Render-এর ডাটাবেস URL পার্স করার জন্য
+import dj_database_url 
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -396,18 +395,16 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # SECURITY SETTINGS
 # ==========================================
 
-# প্রোডাকশনের জন্য SECRET_KEY এনভায়রনমেন্ট ভেরিয়েবল থেকে আসবে
+
 SECRET_KEY = os.environ.get(
     "SECRET_KEY",
     "django-insecure-local-development-key"
 )
 
-# প্রোডাকশনে ডিফল্টভাবে False থাকবে, লোকাল মেশিনে True
 DEBUG = os.environ.get("DEBUG", "False") == "True"
 
 ALLOWED_HOSTS = os.environ.get("ALLOWED_HOSTS", "*").split(",")
 
-# Render-এ Django Admin প্যানেলে CSRF Error এড়ানোর জন্য এটি অপরিহার্য
 CSRF_TRUSTED_ORIGINS = ['https://*.onrender.com']
 
 
@@ -479,9 +476,7 @@ WSGI_APPLICATION = 'Class_Routine.wsgi.application'
 
 # ==========================================
 # DATABASE
-# ==========================================
-# dj_database_url ব্যবহার করে Render-এর DATABASE_URL স্বয়ংক্রিয়ভাবে কানেক্ট হবে।
-# আর লোকাল মেশিনে কাজ করার জন্য default url দেওয়া আছে।
+
 
 DATABASES = {
     'default': dj_database_url.config(
@@ -528,7 +523,7 @@ USE_TZ = True
 STATIC_URL = '/static/'
 STATIC_ROOT = BASE_DIR / 'staticfiles'
 
-# প্রোডাকশনের জন্য Whitenoise Storage
+
 STATICFILES_STORAGE = 'whitenoise.storage.CompressedManifestStaticFilesStorage'
 
 MEDIA_URL = '/media/'
@@ -544,9 +539,9 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 CORS_ALLOWED_ORIGINS = [
     "http://localhost:3000",
-    # Frontend URL deploy হওয়ার পরে এখানে add করবেন
+    # Frontend URL when deploy 
 ]
-# যদি প্রোডাকশনে আপাতত সব রিকোয়েস্ট অ্যালাউ করতে চান তাহলে নিচের লাইন আনকমেন্ট করতে পারেন:
+
 # CORS_ALLOW_ALL_ORIGINS = True
 
 

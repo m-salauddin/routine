@@ -80,36 +80,33 @@ class Batch(TimeStampedModel):
         sem_name = self.current_semester.name if self.current_semester else "No Semester"
         return f"{self.name} - {self.department.name} ({sem_name})"
 
-    # =========================================================
-    # অটোমেটিক আপডেটের জন্য ম্যাজিক save() মেথড
-    # =========================================================
+ 
     def save(self, *args, **kwargs):
         is_new = self.pk is None
         old_semester = None
         old_status = None
         
-        # ১. ডেটাবেজে আগের অবস্থায় কী ডেটা ছিলো তা বের করে আনা
+       
         if not is_new:
             old_batch = Batch.objects.filter(pk=self.pk).first()
             if old_batch:
                 old_semester = old_batch.current_semester
                 old_status = getattr(old_batch, 'status', None)
 
-        # ২. আগে ব্যাচের মূল ডেটা সেভ করে নেওয়া
         super().save(*args, **kwargs)
 
-        # ৩. আসল ম্যাজিক: অটোমেটিক ইউজার আপডেট
+       
         from django.contrib.auth import get_user_model
         User = get_user_model()
 
         if not is_new:
-            # AUTOMATION 1: সেমিস্টার আপডেট লজিক
+            # AUTOMATION 1: 
             if old_semester != self.current_semester:
                 User.objects.filter(batch=self, role='STUDENT').update(semester=self.current_semester)
 
-            # AUTOMATION 2: গ্র্যাজুয়েশন লজিক (ব্যাচ পাস করে গেলে)
+            # AUTOMATION 2: 
             if old_status == 'ACTIVE' and self.status == 'GRADUATED':
-                # সব স্টুডেন্টের সেমিস্টার মুছে দেওয়া এবং তাদের inactive করে দেওয়া
+                # AUTOMATION 2: If batch is marked as GRADUATED, deactivate students and clear their semester
                 User.objects.filter(batch=self, role='STUDENT').update(semester=None, is_active=False)
 
                 
@@ -240,7 +237,7 @@ class SystemBackup(models.Model):
     backup_data = models.TextField(help_text="Full database snapshot in JSON format")
     created_at = models.DateTimeField(auto_now_add=True)
     
-    # এই লাইনটা আপডেট হবে
+   
     created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True)
 
     class Meta:

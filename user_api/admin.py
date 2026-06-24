@@ -15,7 +15,7 @@ class UserResource(resources.ModelResource):
         import_id_fields = ('username',) 
         skip_unchanged = True
         report_skipped = True
-        # এখানে 'batch' যোগ করা হয়েছে এক্সেল ইমপোর্টের জন্য
+       
         fields = ('id', 'username', 'email', 'password', 'first_name', 'last_name', 'role', 'department', 'batch', 'semester', 'is_active', 'is_staff', 'is_superuser')
 
     def before_import_row(self, row, **kwargs):

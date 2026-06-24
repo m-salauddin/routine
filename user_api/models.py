@@ -18,7 +18,7 @@ class User(AbstractUser):
         blank=True
     )
     
-    # Batch টি এখানে যোগ করা হলো
+   
     batch = models.ForeignKey(
         'academic.Batch', 
         on_delete=models.SET_NULL, 

@@ -23,7 +23,7 @@ urlpatterns = [
     path('', include(router.urls)),
     path('generate-routine/', GenerateRoutineView.as_view(), name='generate-routine'),
     path('rollback-routine/', RollbackRoutineView.as_view(), name='rollback-routine'),
-    path('cancel-class/', TeacherCancelClassView.as_view(), name='cancel-class'), # নতুন এন্ডপয়েন্ট
+    path('cancel-class/', TeacherCancelClassView.as_view(), name='cancel-class'), 
     path('view-routine/', RoutineListView.as_view(), name='view-routine'),
     path('import-excel/', ExcelImportView.as_view(), name='import-excel'),
     path('export-excel/', ExcelExportView.as_view(), name='export-excel'),
