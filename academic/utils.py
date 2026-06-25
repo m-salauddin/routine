@@ -428,10 +428,10 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
                 "successful_classes": scheduled_count,
                 "dropped_classes": len(dropped_sessions),
                 "shortage_details": dropped_sessions,
-                "message": "সিস্টেমে কিছু ক্লাস বসানো সম্ভব হয়নি। আপনি চাইলে এই এরর ইগনোর করে আংশিক রুটিন সেভ করতে পারেন।"
+                "message": "Unable to assign some classes in the system. You can ignore this error and save the partial routine."
             }
 
-        summary_message = "রুটিন ১০০% সফলভাবে তৈরি হয়েছে!" if len(dropped_sessions) == 0 else "আংশিক রুটিন তৈরি করা হয়েছে।"
+        summary_message = "Routine generated 100% successfully" if len(dropped_sessions) == 0 else "Partial routine successfully generated. Some classes could not be scheduled due to conflicts."
         
         return {
             "status": "Success",

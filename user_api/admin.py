@@ -19,7 +19,7 @@ class UserResource(resources.ModelResource):
         fields = ('id', 'username', 'email', 'password', 'first_name', 'last_name', 'role', 'department', 'batch', 'semester', 'is_active', 'is_staff', 'is_superuser')
 
     def before_import_row(self, row, **kwargs):
-        """পাসওয়ার্ড হ্যাশ করার ম্যাজিক হুক"""
+        """password field is hashed before saving to the database."""
         password = row.get('password')
         if password:
             if not str(password).startswith('pbkdf2_'):
@@ -35,12 +35,12 @@ class UserResource(resources.ModelResource):
 class CustomUserAdmin(ImportExportModelAdmin, UserAdmin):
     resource_class = UserResource
     
-    # এখানে list_display এবং list_filter এ 'batch' যোগ করা হয়েছে
+    # Adding the custom fields to the list display, filter, and search options
     list_display = ('username', 'email', 'first_name', 'last_name', 'role', 'department', 'batch', 'semester', 'is_active')
     list_filter = ('role', 'department', 'batch', 'semester', 'is_active', 'is_staff')
     search_fields = ('username', 'email', 'first_name', 'last_name')
     
-    # ম্যানুয়ালি ইউজার এডিট করার পেজে 'batch' দেখানোর ব্যবস্থা
+    # manually adding the custom fields to the fieldsets of the UserAdmin
     fieldsets = UserAdmin.fieldsets + (
         ('Academic Profile (Custom Fields)', {
             'fields': ('role', 'department', 'batch', 'semester')

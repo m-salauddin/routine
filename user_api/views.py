@@ -54,7 +54,7 @@ class StudentPanelView(APIView):
     def get(self, request):
         user = request.user
         
-        # স্টুডেন্টের ব্যাচ চেক করা হচ্ছে
+        # check if the user has department, semester, and batch set
         if not user.department or not user.semester or not user.batch:
             content = {
                 'message': f'Welcome, {user.username}!',

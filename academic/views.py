@@ -7,6 +7,7 @@ from django.core import serializers
 import json
 import tablib
 import datetime
+from .models import RoutineEntry, ActivityLog
 
 from drf_yasg.utils import swagger_auto_schema
 from drf_yasg import openapi
@@ -476,17 +477,20 @@ class TeacherCancelClassView(APIView):
             entry.is_cancelled = True
             entry.cancel_message = cancel_message
             entry.save()
+            ActivityLog.objects.create(actor=request.user,action_description=f"CANCELLED class: {entry.course.course_name} on {entry.day.name}.", severity='WARNING')
             return Response({
                 "status": "success",
                 "message": "Class cancelled successfully.", 
                 "cancel_message": cancel_message
             })
+        
 
         # ২. again class re-activate
         elif action == 'reactivate':
             entry.is_cancelled = False
             entry.cancel_message = None  # Remove the cancellation message when reactivating
             entry.save()
+            ActivityLog.objects.create(actor=request.user, action_description=f"REACTIVATED class: {entry.course.course_name} on {entry.day.name}.", severity='SUCCESS')
             return Response({
                 "status": "success",
                 "message": "Class reactivated successfully. The cancellation message has been removed."
@@ -509,6 +513,7 @@ class TeacherCancelClassView(APIView):
                 
             entry.cancel_message = new_cancel_message
             entry.save()
+            ActivityLog.objects.create(actor=request.user, action_description=f"UPDATED cancellation message for: {entry.course.course_name}.", severity='INFO')
             return Response({
                 "status": "success",
                 "message": "Cancellation message updated successfully.", 
