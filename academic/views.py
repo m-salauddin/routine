@@ -8,6 +8,18 @@ import json
 import tablib
 import datetime
 
+from drf_yasg.utils import swagger_auto_schema
+from drf_yasg import openapi
+from rest_framework.views import APIView
+from rest_framework.response import Response
+from rest_framework import status
+from rest_framework.permissions import IsAuthenticated
+from .models import RoutineEntry
+
+
+from .models import Notification
+from .serializers import NotificationSerializer
+
 from rest_framework import viewsets, status
 from rest_framework.views import APIView
 from rest_framework.response import Response
@@ -421,48 +433,94 @@ class RoutineListView(APIView):
         return Response(modified_data)
 
 
+# ==============================================================================
+# TEACHER PANEL: CANCEL, REACTIVATE & UPDATE CLASS
+# ==============================================================================
+
 class TeacherCancelClassView(APIView):
     permission_classes = [IsAuthenticated]
-    
+
     @swagger_auto_schema(
-        tags=['3. Teacher Operations'],
-        operation_description="**[TEACHER ONLY]** Send a cancellation notice to students for a specific class.",
+        tags=['3. Teacher Panel'],
         request_body=openapi.Schema(
             type=openapi.TYPE_OBJECT,
-            required=['routine_id', 'cancel_message'],
             properties={
-                'routine_id': openapi.Schema(type=openapi.TYPE_INTEGER, default=1),
-                'cancel_message': openapi.Schema(type=openapi.TYPE_STRING, default="Class cancelled due to meeting."),
-            }
+                'action': openapi.Schema(
+                    type=openapi.TYPE_STRING, 
+                    description="Action type: 'cancel', 'reactivate', or 'update'"
+                ),
+                'cancel_message': openapi.Schema(
+                    type=openapi.TYPE_STRING, 
+                    description="Required for 'cancel' and 'update' actions."
+                ),
+            },
+            required=['action']
         ),
-        responses={200: "Success", 403: "Forbidden"}
+        operation_description="Cancel a class, reactivate an off class, or update the cancel message."
     )
-    def post(self, request):
-        user = request.user
-        if getattr(user, 'role', '') != 'TEACHER':
-            return Response({"error": "Only teachers can cancel classes."}, status=status.HTTP_403_FORBIDDEN)
-
-        routine_id = request.data.get('routine_id')
-        cancel_message = request.data.get('cancel_message')
-
-        if not routine_id or not cancel_message:
-            return Response({"error": "routine_id and cancel_message are required."}, status=status.HTTP_400_BAD_REQUEST)
-
+    def post(self, request, entry_id):
         try:
-            routine = RoutineEntry.objects.get(id=routine_id, is_active=True)
-            if routine.course.teacher != user:
-                return Response({"error": "You can only cancel your own classes."}, status=status.HTTP_403_FORBIDDEN)
-
-            routine.is_cancelled = True
-            routine.cancel_message = cancel_message
-            routine.save()
-
-            return Response({
-                "status": "Success",
-                "message": f"Class '{routine.course.course_name}' has been cancelled successfully."
-            })
+            # Check if the entry exists and belongs to the logged-in teacher
+            entry = RoutineEntry.objects.get(id=entry_id, course__teacher=request.user)
         except RoutineEntry.DoesNotExist:
-            return Response({"error": "Routine entry not found or inactive."}, status=status.HTTP_404_NOT_FOUND)
+            return Response(
+                {"error": "Routine entry not found or you don't have permission to modify this class."}, 
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        action = request.data.get('action')
+
+        # ১. class cancel logic
+        if action == 'cancel':
+            cancel_message = request.data.get('cancel_message', 'Class cancelled by teacher.')
+            entry.is_cancelled = True
+            entry.cancel_message = cancel_message
+            entry.save()
+            return Response({
+                "status": "success",
+                "message": "Class cancelled successfully.", 
+                "cancel_message": cancel_message
+            })
+
+        # ২. again class re-activate
+        elif action == 'reactivate':
+            entry.is_cancelled = False
+            entry.cancel_message = None  # Remove the cancellation message when reactivating
+            entry.save()
+            return Response({
+                "status": "success",
+                "message": "Class reactivated successfully. The cancellation message has been removed."
+            })
+
+        # ৩. off class massage update logic
+        elif action == 'update':
+            if not entry.is_cancelled:
+                return Response(
+                    {"error": "Cannot update message. The class is not cancelled yet."}, 
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            new_cancel_message = request.data.get('cancel_message', '')
+            if not new_cancel_message:
+                return Response(
+                    {"error": "Cancel message cannot be empty for update action."}, 
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+                
+            entry.cancel_message = new_cancel_message
+            entry.save()
+            return Response({
+                "status": "success",
+                "message": "Cancellation message updated successfully.", 
+                "cancel_message": new_cancel_message
+            })
+
+        # if the action is none of the above, return an error
+        else:
+            return Response(
+                {"error": "Invalid action. Please use 'cancel', 'reactivate', or 'update'."}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
 
 
 class ManualRoutineUpdateView(APIView):
@@ -794,3 +852,102 @@ class SystemSnapshotView(APIView):
                 return Response({"error": f"Restore failed, system rolled back safely. Reason: {str(e)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
         
         return Response({"error": "Invalid action. Use 'backup' or 'restore'"}, status=status.HTTP_400_BAD_REQUEST)
+    
+
+
+# ==============================================================================
+# 6. SYSTEM NOTIFICATIONS API
+# ==============================================================================
+class NotificationListView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    @swagger_auto_schema(
+        tags=['5. Notifications'],
+        operation_description="**[ALL USERS]** Get all notifications for the logged-in user (Teachers/Students/Admins)."
+    )
+    def get(self, request):
+        notifications = Notification.objects.filter(recipient=request.user)
+        serializer = NotificationSerializer(notifications, many=True)
+        return Response(serializer.data)
+
+class UnreadNotificationCountView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    @swagger_auto_schema(
+        tags=['5. Notifications'],
+        operation_description="**[ALL USERS]** Get the total count of unread notifications to show on the bell icon badge."
+    )
+    def get(self, request):
+        count = Notification.objects.filter(recipient=request.user, is_read=False).count()
+        return Response({"unread_count": count})
+
+class MarkNotificationReadView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    @swagger_auto_schema(
+        tags=['5. Notifications'],
+        operation_description="**[ALL USERS]** Mark a specific notification as read when the user clicks on it."
+    )
+    def patch(self, request, pk):
+        try:
+            notification = Notification.objects.get(pk=pk, recipient=request.user)
+            notification.is_read = True
+            notification.save()
+            return Response({"status": "success", "message": "Notification marked as read."})
+        except Notification.DoesNotExist:
+            return Response({"error": "Notification not found."}, status=status.HTTP_404_NOT_FOUND)
+        
+
+
+
+# ==============================================================================
+# 7. SYSTEM LOGS API (AUDIT TRAIL)
+# ==============================================================================
+from django.db.models import Q
+from .models import ActivityLog
+from .serializers import ActivityLogSerializer
+
+class BaseActivityLogView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get_filtered_logs(self, request):
+        user = request.user
+        # 1. if the user is an admin or superuser, return all logs
+        if user.is_staff or user.is_superuser:
+            logs = ActivityLog.objects.all()
+        # 2. normal user case: only logs where the user is the actor or related user
+        else:
+            logs = ActivityLog.objects.filter(Q(actor=user) | Q(related_users=user)).distinct()
+        
+        # 3. user hide log filter
+        logs = logs.exclude(hidden_by=user)
+        return logs
+
+class RecentActivityLogView(BaseActivityLogView):
+    @swagger_auto_schema(tags=['6. Activity Logs'], operation_description="Get 10 most recent logs.")
+    def get(self, request):
+        # last 10 history logs
+        logs = self.get_filtered_logs(request)[:10]
+        serializer = ActivityLogSerializer(logs, many=True)
+        return Response(serializer.data)
+
+class AllActivityLogView(BaseActivityLogView):
+    @swagger_auto_schema(tags=['6. Activity Logs'], operation_description="Get all history logs.")
+    def get(self, request):
+        # all history logs 
+        logs = self.get_filtered_logs(request)
+        serializer = ActivityLogSerializer(logs, many=True)
+        return Response(serializer.data)
+
+class HideActivityLogView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    @swagger_auto_schema(tags=['6. Activity Logs'], operation_description="Hide a log from user's dashboard.")
+    def post(self, request, pk):
+        try:
+            log = ActivityLog.objects.get(pk=pk)
+            # log do not delete, just add the user to hidden_by
+            log.hidden_by.add(request.user)
+            return Response({"status": "success", "message": "Log dismissed successfully."})
+        except ActivityLog.DoesNotExist:
+            return Response({"error": "Log not found."}, status=status.HTTP_404_NOT_FOUND)

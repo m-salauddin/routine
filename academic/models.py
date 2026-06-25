@@ -286,3 +286,82 @@ class TemporarySwapRequest(TimeStampedModel):
 
     def __str__(self):
         return f"{self.get_swap_type_display()} | {self.requester.username} -> {self.target_teacher.username} | Date: {self.swap_date} | {self.status}"
+    
+
+
+
+
+# ==============================================================================
+# 6. SYSTEM NOTIFICATIONS (Event-Driven Alerts)
+# ==============================================================================
+class Notification(TimeStampedModel):
+    NOTIFICATION_TYPES = (
+        ('SWAP_REQ', 'Swap Request Received'),
+        ('SWAP_ACC', 'Swap Request Accepted'),
+        ('SWAP_REJ', 'Swap Request Rejected'),
+        ('CLASS_DEL', 'Class Cancelled'),
+        ('ADMIN_MSG', 'Admin Message'),
+    )
+
+    recipient = models.ForeignKey(settings.AUTH_USER_MODEL, related_name='notifications', on_delete=models.CASCADE)
+    sender = models.ForeignKey(
+        settings.AUTH_USER_MODEL, related_name='sent_notifications', 
+        on_delete=models.SET_NULL, null=True, blank=True
+    )
+    
+    notification_type = models.CharField(max_length=20, choices=NOTIFICATION_TYPES)
+    title = models.CharField(max_length=255)
+    message = models.TextField()
+    action_url = models.CharField(
+        max_length=255, null=True, blank=True, 
+        help_text="Frontend URL to redirect when user clicks the notification"
+    )
+    is_read = models.BooleanField(default=False)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"To {self.recipient.username} - {self.title} [Read: {self.is_read}]"
+    
+
+
+
+# ==============================================================================
+# 7. SYSTEM ACTIVITY LOGS (Audit Trail)
+# ==============================================================================
+class ActivityLog(models.Model):
+    SEVERITY_CHOICES = (
+        ('INFO', 'Information'),       # General actions (e.g., Logins, viewing)
+        ('SUCCESS', 'Success'),        # Positive actions (e.g., Swap accepted)
+        ('WARNING', 'Warning'),        # Cautious actions (e.g., Class cancelled)
+        ('DANGER', 'Danger'),          # Critical actions (e.g., Deletions, Reset)
+    )
+
+    # who performed the action (e.g., admin, teacher)
+    actor = models.ForeignKey(
+        settings.AUTH_USER_MODEL, related_name='performed_logs', 
+        on_delete=models.SET_NULL, null=True, blank=True
+    )
+    
+    # who is affected by this action (e.g., students, teachers)
+    related_users = models.ManyToManyField(
+        settings.AUTH_USER_MODEL, related_name='related_logs', blank=True
+    )
+    
+    action_description = models.CharField(max_length=500)
+    severity = models.CharField(max_length=20, choices=SEVERITY_CHOICES, default='INFO')
+    
+    # who can see this log and who has hidden it
+    hidden_by = models.ManyToManyField(
+        settings.AUTH_USER_MODEL, related_name='hidden_logs', blank=True
+    )
+    
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def __str__(self):
+        actor_name = self.actor.username if self.actor else "System"
+        return f"[{self.severity}] {actor_name}: {self.action_description}"

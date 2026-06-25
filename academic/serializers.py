@@ -1,7 +1,8 @@
+# academic/serializers.py
 from rest_framework import serializers
 
-# Importing all models including the new dynamic ones
-from .models import Day, RoomType, RoomSubType, Department, Semester, Course, TimeSlot, RoutineEntry, Room
+# Importing all models including the new dynamic ones and Notification
+from .models import ActivityLog, Day, RoomType, RoomSubType, Department, Semester, Course, TimeSlot, RoutineEntry, Room, Notification
 
 # Added serializers for the new dynamic models so they can be accessed via API if needed
 class DaySerializer(serializers.ModelSerializer):
@@ -81,55 +82,11 @@ class TimeSlotSerializer(serializers.ModelSerializer):
         fields = ['id', 'start_time', 'end_time', 'is_lunch_break']
 
 
-# class RoutineEntrySerializer(serializers.ModelSerializer):
-#     day_name = serializers.CharField(source='day.name', read_only=True)
-#     course_name = serializers.CharField(source='course.course_name', read_only=True)
-#     course_code = serializers.CharField(source='course.course_code', read_only=True)
-
-#     teacher_name = serializers.SerializerMethodField()
-#     department_name = serializers.SerializerMethodField()
-#     semester_name = serializers.SerializerMethodField()
-    
-#     room_number = serializers.CharField(source='room.room_number', read_only=True)
-#     start_time = serializers.TimeField(source='time_slot.start_time', read_only=True)
-#     end_time = serializers.TimeField(source='time_slot.end_time', read_only=True)
-#     credits = serializers.IntegerField(source='course.credits', read_only=True)
-
-#     class Meta:
-#         model = RoutineEntry
-#         fields = [
-#             'id', 
-#             'day', 'day_name',
-#             'start_time', 
-#             'end_time',
-#             'course_name', 
-#             'course_code', 
-#             'credits',       
-#             'teacher_name', 
-#             'department_name', 
-#             'semester_name', 
-#             'room_number',
-#             'group_name',
-#             'is_cancelled',   # New field
-#             'cancel_message'  # New field
-#         ]
-
-#     def get_teacher_name(self, obj):
-#         return obj.course.teacher.username if obj.course.teacher else "No Teacher"
-
-#     def get_department_name(self, obj):
-#         return obj.course.department.name if obj.course.department else "N/A"
-
-#     def get_semester_name(self, obj):
-#         return obj.course.semester.name if obj.course.semester else "N/A"
-
-
 class RoutineEntrySerializer(serializers.ModelSerializer):
     day_name = serializers.CharField(source='day.name', read_only=True)
     course_name = serializers.CharField(source='course.course_name', read_only=True)
     course_code = serializers.CharField(source='course.course_code', read_only=True)
 
-   
     course_type = serializers.SerializerMethodField()
 
     teacher_name = serializers.SerializerMethodField()
@@ -162,7 +119,6 @@ class RoutineEntrySerializer(serializers.ModelSerializer):
             'cancel_message'  
         ]
 
-   
     def get_course_type(self, obj):
         return obj.course.course_type.name if obj.course and obj.course.course_type else "N/A"
 
@@ -174,3 +130,35 @@ class RoutineEntrySerializer(serializers.ModelSerializer):
 
     def get_semester_name(self, obj):
         return obj.course.semester.name if obj.course.semester else "N/A"
+
+
+# ==============================================================================
+# 5. NOTIFICATION SERIALIZER
+# ==============================================================================
+class NotificationSerializer(serializers.ModelSerializer):
+    sender_name = serializers.CharField(source='sender.username', read_only=True, default="System")
+    created_at_formatted = serializers.DateTimeField(source='created_at', format="%Y-%m-%d %I:%M %p", read_only=True)
+
+    class Meta:
+        model = Notification
+        fields = [
+            'id', 'recipient', 'sender', 'sender_name', 
+            'notification_type', 'title', 'message', 
+            'action_url', 'is_read', 'created_at', 'created_at_formatted'
+        ]
+
+
+
+# ==============================================================================
+# 6. ACTIVITY LOG SERIALIZER
+# ==============================================================================
+class ActivityLogSerializer(serializers.ModelSerializer):
+    actor_name = serializers.CharField(source='actor.username', read_only=True, default="System")
+    created_at_formatted = serializers.DateTimeField(source='created_at', format="%Y-%m-%d %I:%M %p", read_only=True)
+
+    class Meta:
+        model = ActivityLog
+        fields = [
+            'id', 'actor', 'actor_name', 'action_description', 
+            'severity', 'created_at', 'created_at_formatted'
+        ]
