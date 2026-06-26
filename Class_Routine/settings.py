@@ -413,6 +413,7 @@ CSRF_TRUSTED_ORIGINS = ['https://*.onrender.com']
 # ==========================================
 
 INSTALLED_APPS = [
+    'jazzmin', 
     'django.contrib.admin',
     'django.contrib.auth',
     'django.contrib.contenttypes',
@@ -441,7 +442,8 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
-    'whitenoise.middleware.WhiteNoiseMiddleware', # Whitenoise for static files
+    'whitenoise.middleware.WhiteNoiseMiddleware',
+    
 
     'django.contrib.sessions.middleware.SessionMiddleware',
     'corsheaders.middleware.CorsMiddleware', # CORS Middleware
@@ -519,7 +521,7 @@ USE_TZ = True
 # ==========================================
 # STATIC & MEDIA FILES
 # ==========================================
-
+DEBUG = os.environ.get('DEBUG', 'True') == 'True'
 STATIC_URL = '/static/'
 STATIC_ROOT = BASE_DIR / 'staticfiles'
 
@@ -540,6 +542,7 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 CORS_ALLOWED_ORIGINS = [
     "http://localhost:3000",
     # Frontend URL when deploy 
+    "https://automated-university-routine.vercel.app"
 ]
 
 # CORS_ALLOW_ALL_ORIGINS = True
@@ -600,3 +603,14 @@ SWAGGER_SETTINGS = {
     },
     'USE_SESSION_AUTH': False, # Session auth disable kore shudhu Token/JWT specify kora
 }
+
+
+STORAGES = {
+    "staticfiles": {
+        "BACKEND": "whitenoise.storage.CompressedManifestStaticFilesStorage",
+    },
+}
+
+
+
+
