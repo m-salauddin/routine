@@ -26,6 +26,14 @@ from drf_yasg.views import get_schema_view
 from drf_yasg import openapi
 
 
+from django.contrib import admin
+
+
+admin.site.site_header = "Routine Management System" 
+admin.site.site_title = "Admin Dashboard"
+admin.site.index_title = "Welcome to the Admin Portal"
+
+
 schema_view = get_schema_view(
    openapi.Info(
       title="Routine Generator API",
