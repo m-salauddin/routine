@@ -4,7 +4,7 @@ from rest_framework.routers import DefaultRouter
 
 
 from .views import (
-    DepartmentViewSet, SemesterViewSet, CourseViewSet, SystemSnapshotView,TeacherSwapRequestView, 
+    AdminCancelClassView, DepartmentRoutineView, DepartmentViewSet, SemesterViewSet, CourseViewSet, SystemSettingView, SystemSnapshotView,TeacherSwapRequestView, 
     TimeSlotViewSet, RoomViewSet, GenerateRoutineView, 
     RoutineListView, RollbackRoutineView, TeacherCancelClassView ,ExcelImportView, ExcelExportView,
     ManualRoutineUpdateView, RoutineSwapView,SystemExcelSyncView,
@@ -46,6 +46,9 @@ urlpatterns = [
     path('logs/recent/', RecentActivityLogView.as_view(), name='logs-recent'),
     path('logs/all/', AllActivityLogView.as_view(), name='logs-all'),
     path('logs/<int:pk>/hide/', HideActivityLogView.as_view(), name='logs-hide'),
+    path('system-settings/', SystemSettingView.as_view(), name='system-settings'),
+    path('department-routine/', DepartmentRoutineView.as_view(), name='department-routine'),
+    path('admin/routine/<int:entry_id>/cancel/', AdminCancelClassView.as_view(), name='admin-cancel-class'),
     
    
  

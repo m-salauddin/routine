@@ -7,7 +7,7 @@ from django.core import serializers
 import json
 import tablib
 import datetime
-from .models import RoutineEntry, ActivityLog
+from .models import RoutineEntry, ActivityLog, SystemSetting
 
 from drf_yasg.utils import swagger_auto_schema
 from drf_yasg import openapi
@@ -268,12 +268,31 @@ class GenerateRoutineView(APIView):
             )
             
             if result.get("status") == "Warning":
+                # ==========================================================
+                # ACTIVITY LOG (Partial Generation / Warning)
+                # ==========================================================
+                ActivityLog.objects.create(
+                    actor=request.user,
+                    action_description=f"GENERATED partial routine for Dept ID: {department.id} (Conflict Warnings Ignored).",
+                    severity='WARNING'
+                )
                 return Response(result, status=status.HTTP_409_CONFLICT)
+                
             elif result.get("status") == "Locked":
                 return Response(result, status=status.HTTP_403_FORBIDDEN)
+                
             elif result.get("status") == "Error":
                 return Response(result, status=status.HTTP_400_BAD_REQUEST)
+                
             else:
+                # ==========================================================
+                # ACTIVITY LOG (Routine Generation Success)
+                # ==========================================================
+                ActivityLog.objects.create(
+                    actor=request.user, 
+                    action_description=f"GENERATED a new master routine for Dept ID: {department.id}.", 
+                    severity='SUCCESS'
+                )
                 return Response(result, status=status.HTTP_200_OK)
             
         except Department.DoesNotExist:
@@ -282,6 +301,7 @@ class GenerateRoutineView(APIView):
             return Response({"status": "error", "message": "Semester not found or is inactive."}, status=status.HTTP_404_NOT_FOUND)
         except Exception as e:
             return Response({"status": "error", "message": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        
 
 
 class RollbackRoutineView(APIView):
@@ -307,14 +327,28 @@ class RollbackRoutineView(APIView):
         try:
             department = Department.objects.get(id=department_id, is_active=True)
             result = rollback_routine_algorithm(department.id)
-            return Response(result)
+            
+            
+            if result.get("status") == "error" or result.get("status") == "Error":
+                return Response(result, status=status.HTTP_400_BAD_REQUEST)
+                
+            # ==========================================================
+            # ACTIVITY LOG (Routine Rollback Success)
+            # ==========================================================
+            ActivityLog.objects.create(
+                actor=request.user,
+                action_description=f"ROLLED BACK the master routine to its previous state for Dept ID: {department.id}.",
+                severity='WARNING' 
+            )
+            
+            return Response(result, status=status.HTTP_200_OK)
             
         except Department.DoesNotExist:
             return Response({"status": "error", "message": "Department not found."}, status=status.HTTP_404_NOT_FOUND)
         except Exception as e:
             return Response({"status": "error", "message": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
-
+ 
 class RoutineListView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -528,6 +562,7 @@ class TeacherCancelClassView(APIView):
             )
 
 
+
 class ManualRoutineUpdateView(APIView):
     @swagger_auto_schema(
         tags=['2. Manual Operations'],
@@ -562,6 +597,15 @@ class ManualRoutineUpdateView(APIView):
         entry.time_slot_id = new_time_slot_id
         entry.room_id = new_room_id
         entry.save()
+
+        # ==========================================================
+        # ACTIVITY LOG (Manual Routine Update)
+        # ==========================================================
+        ActivityLog.objects.create(
+            actor=request.user,
+            action_description=f"MANUALLY UPDATED class schedule for Entry ID: {entry.id}.",
+            severity='WARNING'
+        )
 
         return Response({"status": "success", "message": "Routine successfully update kora hoyeche!"})
 
@@ -623,8 +667,16 @@ class RoutineSwapView(APIView):
             entry2.time_slot = temp_time
             entry2.save()
 
-        return Response({"status": "success", "message": "Duti class er shudhu somoy successfully swap kora hoyeche!"})
+            # ==========================================================
+            # ACTIVITY LOG (Permanent Admin Swap)
+            # ==========================================================
+            ActivityLog.objects.create(
+                actor=request.user,
+                action_description=f"PERMANENTLY SWAPPED time slots between Class ID: {entry1.id} and Class ID: {entry2.id}.",
+                severity='WARNING' 
+            )
 
+        return Response({"status": "success", "message": "Duti class er shudhu somoy successfully swap kora hoyeche!"})
 # ==============================================================================
 # DYNAMIC EXCEL IMPORT & EXPORT APIs (Master API)
 # ==============================================================================
@@ -637,6 +689,8 @@ RESOURCE_MAP = {
     'batch': BatchResource,
     'routine': RoutineEntryResource,
 }
+
+
 
 class ExcelImportView(APIView):
     permission_classes = [IsAdminUser]
@@ -678,11 +732,23 @@ class ExcelImportView(APIView):
                     "status": "error", "message": "Data validation failed! Please check your Excel file.", "details": error_details
                 }, status=status.HTTP_400_BAD_REQUEST)
 
+            
             resource.import_data(dataset, dry_run=False)
+            
+            # ==========================================================
+            # ৩. ACTIVITY LOG (Excel Upload)
+            # ==========================================================
+            ActivityLog.objects.create(
+                actor=request.user,
+                action_description=f"IMPORTED academic data for '{model_name.capitalize()}' via Excel sync.",
+                severity='SUCCESS'
+            )
+
             return Response({"status": "success", "message": f"{model_name.capitalize()} data imported successfully!"}, status=status.HTTP_200_OK)
 
         except Exception as e:
             return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
 
 class ExcelExportView(APIView):
     permission_classes = [IsAdminUser]
@@ -956,3 +1022,335 @@ class HideActivityLogView(APIView):
             return Response({"status": "success", "message": "Log dismissed successfully."})
         except ActivityLog.DoesNotExist:
             return Response({"error": "Log not found."}, status=status.HTTP_404_NOT_FOUND)
+        
+
+
+class SystemSettingView(APIView):
+    permission_classes = [IsAdminUser]
+
+    @swagger_auto_schema(
+        tags=['4. Enterprise Operations'],
+        operation_description="**[ADMIN ONLY]** Get current system settings (Lock/Unlock status).",
+        responses={200: "Success"}
+    )
+    def get(self, request):
+        # আইডি ১ দিয়ে সবসময় একটি সেটিংই থাকবে
+        setting, created = SystemSetting.objects.get_or_create(id=1)
+        return Response({
+            "is_routine_locked": setting.is_routine_locked,
+            "last_updated": setting.last_updated
+        }, status=status.HTTP_200_OK)
+
+    @swagger_auto_schema(
+        tags=['4. Enterprise Operations'],
+        operation_description="**[ADMIN ONLY]** Lock or Unlock the routine system.",
+        request_body=openapi.Schema(
+            type=openapi.TYPE_OBJECT,
+            required=['is_routine_locked'],
+            properties={
+                'is_routine_locked': openapi.Schema(type=openapi.TYPE_BOOLEAN, description='Set True to lock, False to unlock'),
+            }
+        ),
+        responses={200: "Success"}
+    )
+    def post(self, request):
+        is_locked = request.data.get('is_routine_locked')
+        
+        if is_locked is None:
+            return Response({"error": "is_routine_locked value pathate hobe (True/False)."}, status=status.HTTP_400_BAD_REQUEST)
+
+        setting, created = SystemSetting.objects.get_or_create(id=1)
+        
+       
+        if setting.is_routine_locked != is_locked:
+            setting.is_routine_locked = is_locked
+            setting.save()
+
+            # ==========================================================
+            # ACTIVITY LOG (System Lock/Unlock)
+            # ==========================================================
+            status_text = "LOCKED" if is_locked else "UNLOCKED"
+            log_severity = 'WARNING' if is_locked else 'INFO'
+            
+            ActivityLog.objects.create(
+                actor=request.user,
+                action_description=f"{status_text} the master routine system.",
+                severity=log_severity
+            )
+
+        return Response({
+            "status": "success", 
+            "message": f"Routine system successfully {'locked' if is_locked else 'unlocked'}!",
+            "is_routine_locked": setting.is_routine_locked
+        }, status=status.HTTP_200_OK)
+    
+
+
+
+
+
+from rest_framework.views import APIView
+from rest_framework.response import Response
+from rest_framework import status
+from rest_framework.permissions import IsAuthenticated
+from django.db.models import Q
+from drf_yasg.utils import swagger_auto_schema
+
+
+
+
+class DepartmentRoutineView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    @swagger_auto_schema(
+        tags=['3. Teacher Dashboard'],
+        operation_description="**[TEACHER ONLY]** Get the complete routine for the teacher's department (includes targeted courses, offered courses, and cross-department classes by colleagues).",
+        responses={200: "Success"}
+    )
+    def get(self, request):
+        user = request.user
+
+
+        if user.role != 'TEACHER':
+            return Response({"error": "Shudhumatro Teacher ra ei API access korte parben."}, status=status.HTTP_403_FORBIDDEN)
+        
+        if not user.department:
+            return Response({"error": "Apnar profile e kono department assign kora nei."}, status=status.HTTP_400_BAD_REQUEST)
+
+        teacher_dept = user.department
+
+        routines = RoutineEntry.objects.filter(
+            Q(course__department=teacher_dept) |                 
+            Q(course__offering_department=teacher_dept) |         
+            Q(course__teacher__department=teacher_dept)          
+        ).select_related('day', 'time_slot', 'course', 'room').distinct()
+
+        
+        serializer = RoutineEntrySerializer(routines, many=True)
+
+        return Response({
+            "status": "success",
+            "department": teacher_dept.name,
+            "total_classes": routines.count(),
+            "data": serializer.data
+        }, status=status.HTTP_200_OK)
+    
+
+
+
+
+
+class AdminCancelClassView(APIView):
+    permission_classes = [IsAdminUser]
+
+    @swagger_auto_schema(
+        tags=['2. Manual Operations'],
+        request_body=openapi.Schema(
+            type=openapi.TYPE_OBJECT,
+            properties={
+                'action': openapi.Schema(
+                    type=openapi.TYPE_STRING, 
+                    description="Action type: 'cancel', 'reactivate', or 'update'"
+                ),
+                'cancel_message': openapi.Schema(
+                    type=openapi.TYPE_STRING, 
+                    description="Required for 'cancel' and 'update' actions."
+                ),
+            },
+            required=['action']
+        ),
+        operation_description="**[ADMIN ONLY]** Temporarily cancel any class, reactivate an off class, or update the cancel message for any routine entry."
+    )
+    def post(self, request, entry_id):
+        try:
+            # admin can access any routine entry, so no teacher filter is applied
+            entry = RoutineEntry.objects.get(id=entry_id)
+        except RoutineEntry.DoesNotExist:
+            return Response(
+                {"error": "Routine entry not found."}, 
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        action = request.data.get('action')
+
+        # ১. Class Cancel Logic
+        if action == 'cancel':
+            # if admin does not provide a custom message, use a default cancellation message
+            cancel_message = request.data.get('cancel_message', 'Class temporarily cancelled by Administration.')
+            entry.is_cancelled = True
+            entry.cancel_message = cancel_message
+            entry.save()
+            
+            # ==========================================================
+            # ACTIVITY LOG (Admin Cancel)
+            # ==========================================================
+            ActivityLog.objects.create(
+                actor=request.user,
+                action_description=f"ADMIN CANCELLED class: {entry.course.course_code} ({entry.course.course_name}) on {entry.day.name}.", 
+                severity='WARNING'
+            )
+            return Response({
+                "status": "success",
+                "message": "Class cancelled successfully by Admin.", 
+                "cancel_message": cancel_message
+            })
+        
+        # ২. Class Reactivate Logic 
+        elif action == 'reactivate':
+            entry.is_cancelled = False
+            entry.cancel_message = None  
+            entry.save()
+            
+            # ==========================================================
+            # ACTIVITY LOG (Admin Reactivate)
+            # ==========================================================
+            ActivityLog.objects.create(
+                actor=request.user, 
+                action_description=f"ADMIN REACTIVATED class: {entry.course.course_code} ({entry.course.course_name}) on {entry.day.name}.", 
+                severity='SUCCESS'
+            )
+            return Response({
+                "status": "success",
+                "message": "Class reactivated successfully by Admin."
+            })
+
+        # ৩. Cancel Message Update Logic
+        elif action == 'update':
+            if not entry.is_cancelled:
+                return Response(
+                    {"error": "Cannot update message. The class is not cancelled yet."}, 
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            new_cancel_message = request.data.get('cancel_message', '')
+            if not new_cancel_message:
+                return Response(
+                    {"error": "Cancel message cannot be empty for update action."}, 
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+                
+            entry.cancel_message = new_cancel_message
+            entry.save()
+            
+            # ==========================================================
+            # ACTIVITY LOG (Admin Update Message)
+            # ==========================================================
+            ActivityLog.objects.create(
+                actor=request.user, 
+                action_description=f"ADMIN UPDATED cancellation message for: {entry.course.course_code}.", 
+                severity='INFO'
+            )
+            return Response({
+                "status": "success",
+                "message": "Cancellation message updated successfully by Admin.", 
+                "cancel_message": new_cancel_message
+            })
+
+        # if the action is none of the above, return an error
+        else:
+            return Response(
+                {"error": "Invalid action. Please use 'cancel', 'reactivate', or 'update'."}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+    permission_classes = [IsAdminUser]  
+
+    @swagger_auto_schema(
+        tags=['4. Enterprise Operations'], 
+        request_body=openapi.Schema(
+            type=openapi.TYPE_OBJECT,
+            properties={
+                'action': openapi.Schema(
+                    type=openapi.TYPE_STRING, 
+                    description="Action type: 'cancel', 'reactivate', or 'update'"
+                ),
+                'cancel_message': openapi.Schema(
+                    type=openapi.TYPE_STRING, 
+                    description="Required for 'cancel' and 'update' actions."
+                ),
+            },
+            required=['action']
+        ),
+        operation_description="**[ADMIN ONLY]** Temporarily cancel ANY class, reactivate an off class, or update the cancel message."
+    )
+    def post(self, request, entry_id):
+        try:
+            # Admin can access any routine entry, so no teacher filter is applied
+            entry = RoutineEntry.objects.get(id=entry_id)
+        except RoutineEntry.DoesNotExist:
+            return Response(
+                {"error": "Routine entry not found."}, 
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        action = request.data.get('action')
+
+        # ১. class cancel logic (Admin)
+        if action == 'cancel':
+            # if no custom message is provided, use a default admin cancellation message
+            cancel_message = request.data.get('cancel_message', 'Class temporarily cancelled by Administration.')
+            entry.is_cancelled = True
+            entry.cancel_message = cancel_message
+            entry.save()
+            
+            ActivityLog.objects.create(
+                actor=request.user,
+                action_description=f"ADMIN CANCELLED class: {entry.course.course_name} on {entry.day.name}.", 
+                severity='WARNING'
+            )
+            return Response({
+                "status": "success",
+                "message": "Class cancelled successfully by Admin.", 
+                "cancel_message": cancel_message
+            })
+
+        # ২. again class re-activate (Admin)
+        elif action == 'reactivate':
+            entry.is_cancelled = False
+            entry.cancel_message = None
+            entry.save()
+            
+            ActivityLog.objects.create(
+                actor=request.user, 
+                action_description=f"ADMIN REACTIVATED class: {entry.course.course_name} on {entry.day.name}.", 
+                severity='SUCCESS'
+            )
+            return Response({
+                "status": "success",
+                "message": "Class reactivated successfully by Admin."
+            })
+
+        # ৩. off class message update logic (Admin)
+        elif action == 'update':
+            if not entry.is_cancelled:
+                return Response(
+                    {"error": "Cannot update message. The class is not cancelled yet."}, 
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            new_cancel_message = request.data.get('cancel_message', '')
+            if not new_cancel_message:
+                return Response(
+                    {"error": "Cancel message cannot be empty for update action."}, 
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+                
+            entry.cancel_message = new_cancel_message
+            entry.save()
+            
+            ActivityLog.objects.create(
+                actor=request.user, 
+                action_description=f"ADMIN UPDATED cancellation message for: {entry.course.course_name}.", 
+                severity='INFO'
+            )
+            return Response({
+                "status": "success",
+                "message": "Cancellation message updated successfully by Admin.", 
+                "cancel_message": new_cancel_message
+            })
+
+        # if the action is none of the above
+        else:
+            return Response(
+                {"error": "Invalid action. Please use 'cancel', 'reactivate', or 'update'."}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
