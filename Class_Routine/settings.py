@@ -539,10 +539,9 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 # CORS
 # ==========================================
 
-# Render-এর ডোমেইনটি এখানে দিতে হবে
+
 ALLOWED_HOSTS = ['routine-nvxe.onrender.com', 'localhost', '127.0.0.1']
 
-# জ্যাঙ্গো অ্যাডমিন প্যানেলে লগইন করার জন্য এটি বাধ্যতামূলক
 CSRF_TRUSTED_ORIGINS = [
     'https://routine-nvxe.onrender.com'
 ]
