@@ -82,13 +82,18 @@ class TimeSlotSerializer(serializers.ModelSerializer):
         fields = ['id', 'start_time', 'end_time', 'is_lunch_break']
 
 
+
+from rest_framework import serializers
+# ... আপনার মডেল ইমপোর্টগুলো 
+
 class RoutineEntrySerializer(serializers.ModelSerializer):
     day_name = serializers.CharField(source='day.name', read_only=True)
     course_name = serializers.CharField(source='course.course_name', read_only=True)
     course_code = serializers.CharField(source='course.course_code', read_only=True)
 
     course_type = serializers.SerializerMethodField()
-
+    
+    teacher_id = serializers.SerializerMethodField()  # <-- ১. নতুন ফিল্ড যোগ করা হলো
     teacher_name = serializers.SerializerMethodField()
     department_name = serializers.SerializerMethodField()
     semester_name = serializers.SerializerMethodField()
@@ -101,7 +106,7 @@ class RoutineEntrySerializer(serializers.ModelSerializer):
     class Meta:
         model = RoutineEntry
         fields = [
-            'id', 
+            'id',             # এটি হলো requester_routine_id বা target_routine_id
             'day', 
             'day_name',
             'start_time', 
@@ -110,6 +115,7 @@ class RoutineEntrySerializer(serializers.ModelSerializer):
             'course_code', 
             'course_type',    
             'credits',       
+            'teacher_id',     # <-- ২. fields লিস্টে যোগ করা হলো (এটি হলো target_teacher_id)
             'teacher_name', 
             'department_name', 
             'semester_name', 
@@ -122,14 +128,18 @@ class RoutineEntrySerializer(serializers.ModelSerializer):
     def get_course_type(self, obj):
         return obj.course.course_type.name if obj.course and obj.course.course_type else "N/A"
 
+    # <-- ৩. টিচারের আইডি বের করার লজিক (Error Free)
+    def get_teacher_id(self, obj):
+        return obj.course.teacher.id if obj.course and obj.course.teacher else None
+
     def get_teacher_name(self, obj):
-        return obj.course.teacher.username if obj.course.teacher else "No Teacher"
+        return obj.course.teacher.username if obj.course and obj.course.teacher else "No Teacher"
 
     def get_department_name(self, obj):
-        return obj.course.department.name if obj.course.department else "N/A"
+        return obj.course.department.name if obj.course and obj.course.department else "N/A"
 
     def get_semester_name(self, obj):
-        return obj.course.semester.name if obj.course.semester else "N/A"
+        return obj.course.semester.name if obj.course and obj.course.semester else "N/A"
 
 
 # ==============================================================================
