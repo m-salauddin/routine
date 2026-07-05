@@ -4,6 +4,35 @@ from rest_framework import serializers
 # Importing all models including the new dynamic ones and Notification
 from .models import ActivityLog, Day, RoomType, RoomSubType, Department, Semester, Course, TimeSlot, RoutineEntry, Room, Notification
 
+from rest_framework import serializers
+from .models import FixedClassSchedule
+
+from rest_framework import serializers
+from .models import FixedClassSchedule
+
+class FixedClassScheduleSerializer(serializers.ModelSerializer):
+    # showing related fields for better frontend display
+    course_name = serializers.CharField(source='course.course_name', read_only=True)
+    course_code = serializers.CharField(source='course.course_code', read_only=True)
+    day_name = serializers.CharField(source='day.name', read_only=True)
+    room_number = serializers.CharField(source='room.room_number', read_only=True)
+    
+    # Adding start_time and end_time fields to display the time slot details
+    start_time = serializers.TimeField(source='time_slot.start_time', read_only=True)
+    end_time = serializers.TimeField(source='time_slot.end_time', read_only=True)
+
+    class Meta:
+        model = FixedClassSchedule
+        fields = [
+            'id', 'course', 'course_name', 'course_code', 
+            'day', 'day_name', 
+            'time_slot', 'start_time', 'end_time', 
+            'room', 'room_number', 'group_name'
+        ]
+
+
+
+
 # Added serializers for the new dynamic models so they can be accessed via API if needed
 class DaySerializer(serializers.ModelSerializer):
     class Meta:

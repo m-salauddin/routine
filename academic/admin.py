@@ -15,10 +15,30 @@ from django.urls import reverse
 from .models import (
     Day, TimeSlot, RoomType, RoomSubType, Department, 
     Semester, Batch, Room, Course, RoutineEntry, 
-    BatchTimeConstraint, SystemSetting, RoutineBackup
+    BatchTimeConstraint, SystemSetting, RoutineBackup,FixedClassSchedule
 )
 
 User = get_user_model()
+
+
+
+@admin.register(FixedClassSchedule)
+class FixedClassScheduleAdmin(admin.ModelAdmin):
+    list_display = ('course', 'day', 'time_slot', 'room', 'group_name')
+    list_filter = ('day', 'course__department', 'course__semester')
+    search_fields = ('course__course_name', 'course__course_code')
+    ordering = ('day__order', 'time_slot__start_time')
+    
+    # Admin form fieldsets to organize the fields in the admin interface
+    fieldsets = (
+        ('Course & Time', {
+            'fields': ('course', 'day', 'time_slot')
+        }),
+        ('Optional Settings', {
+            'fields': ('room', 'group_name'),
+            'classes': ('collapse',),
+        }),
+    )
 
 
 # CUSTOM WIDGETS (For Two-way Export & Import)

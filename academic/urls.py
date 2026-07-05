@@ -8,8 +8,18 @@ from .views import (
     TimeSlotViewSet, RoomViewSet, GenerateRoutineView, 
     RoutineListView, RollbackRoutineView, TeacherCancelClassView ,ExcelImportView, ExcelExportView,
     ManualRoutineUpdateView, RoutineSwapView,SystemExcelSyncView,
-    SystemSnapshotView,NotificationListView, UnreadNotificationCountView, MarkNotificationReadView,RecentActivityLogView, AllActivityLogView, HideActivityLogView
+    SystemSnapshotView,NotificationListView, UnreadNotificationCountView, MarkNotificationReadView,RecentActivityLogView, AllActivityLogView,
+    HideActivityLogView,FixedClassScheduleListCreateView, FixedClassScheduleDetailView
 )
+
+
+urlpatterns = [
+    # ... আপনার আগের URL গুলো ...
+    
+    # নতুন Fixed Class API URLs
+    
+    
+]
 
 
 
@@ -49,6 +59,9 @@ urlpatterns = [
     path('system-settings/', SystemSettingView.as_view(), name='system-settings'),
     path('department-routine/', DepartmentRoutineView.as_view(), name='department-routine'),
     path('admin/routine/<int:entry_id>/cancel/', AdminCancelClassView.as_view(), name='admin-cancel-class'),
+    path('api/fixed-schedules/', FixedClassScheduleListCreateView.as_view(), name='fixed-schedules-list'),
+    path('api/fixed-schedules/<int:pk>/', FixedClassScheduleDetailView.as_view(), name='fixed-schedules-detail'),
+
     
    
  

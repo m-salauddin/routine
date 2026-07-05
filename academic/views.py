@@ -46,7 +46,78 @@ from .serializers import (
 
 from user_api.permissions import IsAdminUser
 
+
+
 User = get_user_model()
+
+
+
+
+from rest_framework.views import APIView
+from rest_framework.response import Response
+from rest_framework import status
+from rest_framework.permissions import IsAuthenticated
+from drf_yasg.utils import swagger_auto_schema
+from drf_yasg import openapi
+from django.shortcuts import get_object_or_404
+
+from .models import FixedClassSchedule
+from .serializers import FixedClassScheduleSerializer
+
+class FixedClassScheduleListCreateView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def is_admin(self, user):
+        return getattr(user, 'role', '') == 'ADMIN' or user.is_staff
+
+    @swagger_auto_schema(
+        tags=['4. Admin Operations'],
+        operation_description="**[ADMIN ONLY]** Get all fixed class schedules.",
+        responses={200: FixedClassScheduleSerializer(many=True)}
+    )
+    def get(self, request):
+        if not self.is_admin(request.user):
+            return Response({"error": "Only admins can access this API."}, status=status.HTTP_403_FORBIDDEN)
+        
+        schedules = FixedClassSchedule.objects.all()
+        serializer = FixedClassScheduleSerializer(schedules, many=True)
+        return Response({"status": "success", "data": serializer.data}, status=status.HTTP_200_OK)
+
+    @swagger_auto_schema(
+        tags=['4. Admin Operations'],
+        operation_description="**[ADMIN ONLY]** Create a new fixed class schedule.",
+        request_body=FixedClassScheduleSerializer,
+        responses={201: "Created Successfully", 400: "Bad Request"}
+    )
+    def post(self, request):
+        if not self.is_admin(request.user):
+            return Response({"error": "Only admins can perform this action."}, status=status.HTTP_403_FORBIDDEN)
+        
+        serializer = FixedClassScheduleSerializer(data=request.data)
+        if serializer.is_valid():
+            serializer.save()
+            return Response({"status": "success", "message": "Fixed class scheduled successfully!", "data": serializer.data}, status=status.HTTP_201_CREATED)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+class FixedClassScheduleDetailView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def is_admin(self, user):
+        return getattr(user, 'role', '') == 'ADMIN' or user.is_staff
+
+    @swagger_auto_schema(
+        tags=['4. Admin Operations'],
+        operation_description="**[ADMIN ONLY]** Delete a fixed class schedule.",
+        responses={204: "Deleted Successfully", 403: "Forbidden"}
+    )
+    def delete(self, request, pk):
+        if not self.is_admin(request.user):
+            return Response({"error": "Only admins can perform this action."}, status=status.HTTP_403_FORBIDDEN)
+        
+        schedule = get_object_or_404(FixedClassSchedule, pk=pk)
+        schedule.delete()
+        return Response({"status": "success", "message": "Fixed class schedule deleted successfully!"}, status=status.HTTP_204_NO_CONTENT)
 
 # ==============================================================================
 # ROUTINE CONFLICT CHECKER (Helper Function)

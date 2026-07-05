@@ -179,14 +179,35 @@ class RoutineEntry(TimeStampedModel):
 
     is_cancelled = models.BooleanField(default=False)
     cancel_message = models.TextField(null=True, blank=True)
+    
+    #  Admin Pre-Assigned Flag ---
+    is_fixed = models.BooleanField(default=False, help_text="True if this class is pre-assigned by Admin")
 
     class Meta:
         unique_together = (('day', 'time_slot', 'room'), ('day', 'time_slot', 'course'))
 
     def __str__(self):
-        return f"{self.day.name} | {self.time_slot} | {self.course.course_code} | Room: {self.room}"
+        fixed_mark = "[FIXED] " if self.is_fixed else ""
+        return f"{fixed_mark}{self.day.name} | {self.time_slot} | {self.course.course_code} | Room: {self.room}"
 
 
+# --- model to store fixed class schedules (pre-assigned by admin) ---
+class FixedClassSchedule(TimeStampedModel):
+    course = models.ForeignKey(Course, on_delete=models.CASCADE, related_name='fixed_schedules')
+    day = models.ForeignKey(Day, on_delete=models.CASCADE)
+    time_slot = models.ForeignKey(TimeSlot, on_delete=models.CASCADE)
+    
+    # room is optional; if not set, the algorithm can assign any available room of the correct type
+    room = models.ForeignKey(Room, on_delete=models.CASCADE, null=True, blank=True, help_text="Optional: Fix a specific room too")
+    group_name = models.CharField(max_length=50, null=True, blank=True)
+
+    class Meta:
+        # Ensure that each course can only have one fixed schedule per day and time slot
+        unique_together = (('day', 'time_slot', 'course'),)
+        ordering = ['day__order', 'time_slot__start_time']
+
+    def __str__(self):
+        return f"FIXED: {self.course.course_code} - {self.day.name} ({self.time_slot})"
 class BatchTimeConstraint(TimeStampedModel):
     CONSTRAINT_CHOICES = (
         ('CLASS_OFF', 'Class Off / Blocked'),

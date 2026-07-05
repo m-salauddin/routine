@@ -4,7 +4,7 @@ import math
 from django.db import transaction
 from .models import (
     Day, Course, TimeSlot, RoutineEntry, Room, 
-    SystemSetting, RoutineBackup, BatchTimeConstraint
+    SystemSetting, RoutineBackup, BatchTimeConstraint, FixedClassSchedule
 )
 
 class ScheduleConstraint:
@@ -19,7 +19,6 @@ class ScheduleConstraint:
         self.teacher_daily_count = {}
         self.batch_daily_count = {}
         
-        # NEW: Specifically track batch loads per day for even distribution
         self.batch_day_loads = {}
         
         self.batch_constraints = batch_constraints_dict
@@ -143,7 +142,6 @@ class ScheduleConstraint:
         self.day_loads[day_id] += 1
         self.batch_daily_count[(course.department.id, course.semester.id, day_id)] = self.batch_daily_count.get((course.department.id, course.semester.id, day_id), 0) + 1
         
-        # Load balancing tracker increment
         self.batch_day_loads[(course.department.id, course.semester.id, day_id)] = self.batch_day_loads.get((course.department.id, course.semester.id, day_id), 0) + 1
 
         b_key = (day_id, course.department.id, course.semester.id)
@@ -151,15 +149,22 @@ class ScheduleConstraint:
             self.batch_schedule_map[b_key] = set()
         self.batch_schedule_map[b_key].add(slot_idx)
 
-
-def prepare_prioritized_sessions(courses):
+# UPDATE: Added fixed_counts dictionary to handle remaining credits properly
+def prepare_prioritized_sessions(courses, fixed_counts=None):
+    if fixed_counts is None:
+        fixed_counts = {}
+        
     all_sessions = []
     for course in courses:
         total_credits = course.credits if course.credits > 0 else 1
-        credits_filled = 0
-        remaining_credits = course.credits
+        
+        # Calculate remaining credits after deducting fixed classes
+        remaining_credits = course.credits - fixed_counts.get(course.id, 0)
+        if remaining_credits <= 0:
+            continue  # Course is fully scheduled via Fixed Classes
+            
+        credits_filled = fixed_counts.get(course.id, 0)
         is_lab_course = course.course_type and 'lab' in course.course_type.name.lower()
-
         fixed_bonus = 1000 if (course.fixed_day or course.fixed_time_slot or course.fixed_room) else 0
 
         if is_lab_course:
@@ -178,7 +183,6 @@ def prepare_prioritized_sessions(courses):
     random.shuffle(all_sessions)
     all_sessions.sort(key=lambda x: (x['priority_score'], -x['duration']), reverse=True)
     return all_sessions
-
 
 def get_valid_rooms_for_course(course, all_active_rooms, is_lab):
     if course.fixed_room and course.fixed_room.is_active:
@@ -205,7 +209,6 @@ def get_valid_rooms_for_course(course, all_active_rooms, is_lab):
     
     return []
 
-
 def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=False):
     setting = SystemSetting.objects.first()
     if setting and setting.is_routine_locked:
@@ -224,11 +227,42 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
             courses_to_schedule = list(base_courses)
             old_routines = RoutineEntry.objects.filter(course__department_id=department_id)
 
+        # UPDATE: Include is_fixed in Backup
         if old_routines.exists():
-            backup_list = [{'day_id': e.day_id, 'time_slot_id': e.time_slot_id, 'course_id': e.course_id, 'room_id': e.room_id, 'group_name': e.group_name} for e in old_routines]
+            backup_list = [{
+                'day_id': e.day_id, 'time_slot_id': e.time_slot_id, 
+                'course_id': e.course_id, 'room_id': e.room_id, 
+                'group_name': e.group_name, 'is_fixed': getattr(e, 'is_fixed', False)
+            } for e in old_routines]
             RoutineBackup.objects.create(department_id=department_id, backup_data=backup_list)
 
+        # Delete all old routines
         old_routines.delete()
+
+        # =====================================================================
+        # NEW CORE LOGIC: Copy from FixedClassSchedule to RoutineEntry
+        # =====================================================================
+        if semester_id:
+            fixed_schedules = FixedClassSchedule.objects.filter(course__department_id=department_id, course__semester_id=semester_id)
+        else:
+            fixed_schedules = FixedClassSchedule.objects.filter(course__department_id=department_id)
+            
+        fixed_routines_to_insert = []
+        fixed_counts = {}
+        for fs in fixed_schedules:
+            fixed_routines_to_insert.append(RoutineEntry(
+                day=fs.day,
+                time_slot=fs.time_slot,
+                course=fs.course,
+                room=fs.room,
+                group_name=fs.group_name,
+                is_fixed=True
+            ))
+            fixed_counts[fs.course_id] = fixed_counts.get(fs.course_id, 0) + 1
+            
+        if fixed_routines_to_insert:
+            RoutineEntry.objects.bulk_create(fixed_routines_to_insert)
+        # =====================================================================
 
         days = list(Day.objects.all().order_by('order'))
         time_slots = list(TimeSlot.objects.all().order_by('start_time'))
@@ -243,19 +277,21 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
                 continue
             batch_constraints_dict[key] = c.constraint_type
 
-        sorted_sessions = prepare_prioritized_sessions(courses_to_schedule)
+        # UPDATE: Pass fixed_counts to exclude them from dynamic scheduling
+        sorted_sessions = prepare_prioritized_sessions(courses_to_schedule, fixed_counts)
+        
+        # Calculate totals based on FULL course limits for accurate validation
         teacher_totals = {}
         batch_totals = {}
-        for session in sorted_sessions:
-            c = session['course']
-            dur = session['duration']
+        for c in courses_to_schedule:
             if c.teacher:
-                teacher_totals[c.teacher.id] = teacher_totals.get(c.teacher.id, 0) + dur
+                teacher_totals[c.teacher.id] = teacher_totals.get(c.teacher.id, 0) + c.credits
             batch_key = (c.department.id, c.semester.id)
-            batch_totals[batch_key] = batch_totals.get(batch_key, 0) + dur
+            batch_totals[batch_key] = batch_totals.get(batch_key, 0) + c.credits
 
         constraints = ScheduleConstraint(days, time_slots, batch_constraints_dict, teacher_totals, batch_totals)
 
+        # The newly inserted fixed routines will automatically be fetched here and mapped as Occupied!
         existing_routines = RoutineEntry.objects.select_related('day', 'time_slot', 'course', 'course__teacher', 'course__department', 'course__semester', 'room').filter(is_active=True)
         for r in existing_routines:
             constraints.assign(r.day, r.time_slot, r.course, r.room, r.group_name)
@@ -285,9 +321,6 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
                 group_assigned = False
                 sorted_days = allowed_days
                 if not course.fixed_day:
-                    # FIX 1: LOAD BALANCING
-                    # Sort days by how many classes this specific batch already has on that day
-                    # This ensures an even distribution of classes across the week.
                     sorted_days = sorted(
                         allowed_days, 
                         key=lambda d: constraints.batch_day_loads.get((course.department.id, course.semester.id, d.id), 0)
@@ -304,20 +337,15 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
                     
                     possible_starts = list(range(len(time_slots) - duration + 1))
                     
-                    # FIX 2 & 3: HEURISTIC PENALTY SCORING (First/Last Slot & Gap Minimization)
                     def calculate_slot_score(start_idx):
                         score = 0
-                        
-                        # Apply heavy penalty to first and last slots (Avoid them)
                         if start_idx == 0:
                             score += 100
                         if start_idx + duration == total_slots:
                             score += 100
                             
-                        # Slight preference for early-mid day (2nd/3rd slot) over late afternoon
                         score += (start_idx * 2)
 
-                        # Magnetic Gap Logic: Minimize gaps between classes
                         if occupied_slots:
                             min_dist = float('inf')
                             for o in occupied_slots:
@@ -329,16 +357,13 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
                                 if dist < 0: dist = 0 
                                 if dist < min_dist: min_dist = dist
                             
-                            # If placed right next to an existing class, give a massive bonus
                             if min_dist == 0:
                                 score -= 50
                             else:
-                                # Penalize gaps (bigger gap = bigger penalty)
                                 score += (min_dist * 20)
                         
                         return score
 
-                    # Sort slots based on the lowest penalty score
                     possible_starts.sort(key=lambda idx: calculate_slot_score(idx))
 
                     for i in possible_starts:
@@ -367,7 +392,6 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
                             group_assigned = True
                             scheduled_count += 1
 
-                # FALLBACK LOOP
                 if not group_assigned and not course.fixed_day:
                     for day in sorted_days:
                         if group_assigned: break
@@ -424,7 +448,7 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
             transaction.set_rollback(True)
             return {
                 "status": "Warning",
-                "total_classes_required": len(sorted_sessions),
+                "total_classes_required": len(sorted_sessions), # Excludes fixed classes
                 "successful_classes": scheduled_count,
                 "dropped_classes": len(dropped_sessions),
                 "shortage_details": dropped_sessions,
@@ -451,10 +475,12 @@ def rollback_routine_algorithm(department_id):
 
     RoutineEntry.objects.filter(course__department_id=department_id).delete()
     
+    # UPDATE: Restore is_fixed properly from backup data
     routines = [
         RoutineEntry(
             day_id=item['day_id'], time_slot_id=item['time_slot_id'], 
-            course_id=item['course_id'], room_id=item['room_id'], group_name=item.get('group_name')
+            course_id=item['course_id'], room_id=item['room_id'], group_name=item.get('group_name'),
+            is_fixed=item.get('is_fixed', False)
         ) for item in latest_backup.backup_data
     ]
     RoutineEntry.objects.bulk_create(routines)
