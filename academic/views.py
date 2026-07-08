@@ -157,8 +157,13 @@ class SemesterViewSet(viewsets.ModelViewSet):
     serializer_class = SemesterSerializer
     permission_classes = [IsAdminUser]
 
+
 class CourseViewSet(viewsets.ModelViewSet):
-    queryset = Course.objects.filter(is_active=True)
+    # UPDATE: select_related যোগ করা হয়েছে N+1 কোয়েরি প্রবলেম সমাধান করার জন্য
+    queryset = Course.objects.select_related(
+        'teacher', 'department', 'semester', 'fixed_room'
+    ).filter(is_active=True)
+    
     serializer_class = CourseSerializer
     permission_classes = [IsAdminUser]
 

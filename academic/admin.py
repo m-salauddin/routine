@@ -108,6 +108,7 @@ class BatchResource(resources.ModelResource):
         report_skipped = True
         fields = ('id', 'name', 'department', 'current_semester', 'status', 'is_active')
 
+
 class CourseResource(resources.ModelResource):
     department = fields.Field(
         column_name='department',
@@ -124,12 +125,28 @@ class CourseResource(resources.ModelResource):
         attribute='teacher',
         widget=ForeignKeyWidget(User, 'username')
     )
+    
+    # UPDATE: Added Fixed Room for seamless Import/Export
+    fixed_room = fields.Field(
+        column_name='fixed_room',
+        attribute='fixed_room',
+        widget=ForeignKeyWidget(Room, 'room_number')
+    )
 
     class Meta:
         model = Course
         import_id_fields = ('course_code',)
         skip_unchanged = True
         report_skipped = True
+        
+        # UPDATE: Explicitly defining fields to prevent import errors from old Excel sheets
+        fields = (
+            'id', 'course_name', 'course_code', 'department', 'semester', 
+            'offering_department', 'preferred_room_department', 'teacher', 
+            'credits', 'student_count', 'course_type', 'course_sub_type', 
+            'fixed_room'
+        )
+
 
 class RoomResource(resources.ModelResource):
     department = fields.Field(
@@ -210,13 +227,19 @@ class RoomAdmin(ImportExportModelAdmin):
     list_filter = ('room_type', 'department', 'is_active')
     search_fields = ('room_number',)
 
+
+
+
 @admin.register(Course)
 class CourseAdmin(ImportExportModelAdmin):
     resource_class = CourseResource
-    list_display = ('course_code', 'course_name', 'credits', 'course_type', 'department', 'teacher', 'is_active')
-    list_filter = ('department', 'semester', 'course_type', 'is_active')
+    # UPDATE: Added 'fixed_room' at the end to easily spot fixed classes in the admin table
+    list_display = ('course_code', 'course_name', 'credits', 'course_type', 'department', 'teacher', 'fixed_room', 'is_active')
+    
+    # UPDATE: Added 'fixed_room' to the filter so admins can filter courses that have fixed rooms
+    list_filter = ('department', 'semester', 'course_type', 'fixed_room', 'is_active')
+    
     search_fields = ('course_name', 'course_code', 'teacher__username')
-
 
 # academic/admin.py er vitorer RoutineEntryAdmin class ti update korun
 

@@ -155,9 +155,11 @@ class Course(TimeStampedModel):
     course_sub_type = models.ForeignKey(RoomSubType, on_delete=models.SET_NULL, null=True, blank=True)
 
     # Fixed Routine Constraints
-    fixed_day = models.ForeignKey(Day, on_delete=models.SET_NULL, null=True, blank=True)
-    fixed_time_slot = models.ForeignKey(TimeSlot, on_delete=models.SET_NULL, null=True, blank=True)
-    fixed_room = models.ForeignKey(Room, on_delete=models.SET_NULL, null=True, blank=True)
+    # UPDATE: Removed fixed_day and fixed_time_slot. Only fixed_room remains.
+    fixed_room = models.ForeignKey(
+        Room, on_delete=models.SET_NULL, null=True, blank=True,
+        help_text="Force the algorithm to always use this specific room for all classes of this course."
+    )
 
     def __str__(self):
         return f"{self.course_code} - {self.course_name}"
@@ -165,7 +167,6 @@ class Course(TimeStampedModel):
     def get_offering_dept(self):
         # Fallback to target department if offering department is not set
         return self.offering_department if self.offering_department else self.department
-
 
 # ==============================================================================
 # 4. ROUTINE & CONSTRAINT MODELS
@@ -184,12 +185,16 @@ class RoutineEntry(TimeStampedModel):
     is_fixed = models.BooleanField(default=False, help_text="True if this class is pre-assigned by Admin")
 
     class Meta:
-        unique_together = (('day', 'time_slot', 'room'), ('day', 'time_slot', 'course'))
+        #  'group_name' to allow parallel lab groups for the same course
+        unique_together = (
+            ('day', 'time_slot', 'room'), 
+            ('day', 'time_slot', 'course', 'group_name')
+        )
 
     def __str__(self):
         fixed_mark = "[FIXED] " if self.is_fixed else ""
         return f"{fixed_mark}{self.day.name} | {self.time_slot} | {self.course.course_code} | Room: {self.room}"
-
+    
 
 # --- model to store fixed class schedules (pre-assigned by admin) ---
 class FixedClassSchedule(TimeStampedModel):

@@ -14,7 +14,7 @@ class ScheduleConstraint:
         self.course_daily_tracker = set()
         self.teacher_batch_interaction = {}
 
-        # NEW: Smart Parallel Group Tracker
+        # Smart Parallel Group Tracker
         self.batch_slot_groups = {}  # Format: {(day_id, slot_id, dept_id, sem_id): set(groups)}
 
         self.day_loads = {day.id: 0 for day in days}
@@ -24,7 +24,7 @@ class ScheduleConstraint:
         
         self.batch_constraints = batch_constraints_dict
         
-        # NEW: Identify Lunch Break slots for streak resetting
+        # Identify Lunch Break slots for streak resetting
         self.lunch_indices = {idx for idx, slot in enumerate(time_slots) if slot.is_lunch_break}
         
         total_days = max(1, len(days))
@@ -56,11 +56,9 @@ class ScheduleConstraint:
             
         return True
 
-    # UPDATE: Group-aware continuous check and Lunch Break Reset
     def can_schedule_continuous(self, day_id, start_idx, duration, course, group_name=None):
         MAX_CONTINUOUS = 3
 
-        # For batch, we check the specific group + the theory classes (None)
         b_map_key_grp = (day_id, course.department.id, course.semester.id, group_name)
         b_map_key_all = (day_id, course.department.id, course.semester.id, None)
         
@@ -69,7 +67,6 @@ class ScheduleConstraint:
 
         left_idx = start_idx - 1
         left_count = 0
-        # Stop counting streak if we hit a lunch break!
         while left_idx in batch_occupied and left_idx not in self.lunch_indices:
             left_count += 1
             left_idx -= 1
@@ -117,16 +114,16 @@ class ScheduleConstraint:
         if room and (day_id, slot.id, room.id) in self.room_occupied:
             return True
             
-        # NEW: Smart Parallel Group Conflict Logic
+        # Smart Parallel Group Conflict Logic
         b_key = (day_id, slot.id, course.department.id, course.semester.id)
         if b_key in self.batch_slot_groups:
             occupied_groups = self.batch_slot_groups[b_key]
             if None in occupied_groups:
-                return True  # Theory class is taking place, so NO lab can happen
+                return True 
             if group_name is None and len(occupied_groups) > 0:
-                return True  # A lab is taking place, so Theory CANNOT happen
+                return True  
             if group_name in occupied_groups:
-                return True  # This specific group is busy
+                return True  
 
         is_lab = course.course_type and 'lab' in course.course_type.name.lower()
         if not is_lab and (course.id, group_name, day_id) in self.course_daily_tracker:
@@ -156,7 +153,6 @@ class ScheduleConstraint:
         if room:
             self.room_occupied.add((day_id, slot.id, room.id))
         
-        # Add to Group-Aware Tracker
         b_key = (day_id, slot.id, course.department.id, course.semester.id)
         if b_key not in self.batch_slot_groups:
             self.batch_slot_groups[b_key] = set()
@@ -165,7 +161,6 @@ class ScheduleConstraint:
         self.course_daily_tracker.add((course.id, group_name, day_id))
         self.day_loads[day_id] += 1
         
-        # Only count towards batch daily load if it's theory, or count per group? We count per class scheduled.
         self.batch_daily_count[(course.department.id, course.semester.id, day_id)] = self.batch_daily_count.get((course.department.id, course.semester.id, day_id), 0) + 1
         self.batch_day_loads[(course.department.id, course.semester.id, day_id)] = self.batch_day_loads.get((course.department.id, course.semester.id, day_id), 0) + 1
 
@@ -190,9 +185,10 @@ def prepare_prioritized_sessions(courses, fixed_counts=None):
         credits_filled = fixed_counts.get(course.id, 0)
         is_lab_course = course.course_type and 'lab' in course.course_type.name.lower()
         
-        fixed_bonus = 1000 if (course.fixed_day or course.fixed_time_slot or course.fixed_room) else 0
+        # Boost given if the course has a fixed room
+        fixed_bonus = 1000 if course.fixed_room else 0
         if is_lab_course:
-            fixed_bonus += 5000  # BOOST: Labs get absolute highest priority!
+            fixed_bonus += 5000  
 
         if is_lab_course:
             while remaining_credits >= 2:
@@ -244,9 +240,10 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
         return {"status": "Locked", "message": "System is locked. Cannot generate routine."}
 
     with transaction.atomic():
+        # Cleaned up select_related - removed deleted fields
         base_courses = Course.objects.select_related(
             'teacher', 'department', 'semester', 'course_type', 'course_sub_type', 
-            'fixed_day', 'fixed_time_slot', 'fixed_room', 'preferred_room_department', 'offering_department'
+            'fixed_room', 'preferred_room_department', 'offering_department'
         ).filter(department_id=department_id, is_active=True)
 
         if semester_id:
@@ -279,9 +276,7 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
                 continue
             batch_constraints_dict[key] = c.constraint_type
 
-        # =====================================================================
-        # STEP 1: Smart Load Calculation (Accounts for Split Lab Groups!)
-        # =====================================================================
+        # STEP 1: Smart Load Calculation
         teacher_totals = {}
         batch_totals = {}
         
@@ -307,9 +302,7 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
         for r in existing_routines:
             constraints.assign(r.day, r.time_slot, r.course, r.room, r.group_name)
 
-        # =====================================================================
         # STEP 2: Process Fixed Class Schedules 
-        # =====================================================================
         if semester_id:
             fixed_schedules = FixedClassSchedule.objects.filter(course__department_id=department_id, course__semester_id=semester_id)
         else:
@@ -349,9 +342,7 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
         if fixed_routines_to_insert:
             RoutineEntry.objects.bulk_create(fixed_routines_to_insert)
 
-        # =====================================================================
-        # STEP 3: Process Dynamic Schedules (Labs First!)
-        # =====================================================================
+        # STEP 3: Process Dynamic Schedules
         sorted_sessions = prepare_prioritized_sessions(courses_to_schedule, fixed_counts)
         
         scheduled_count = 0
@@ -362,8 +353,7 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
             course = session['course']
             duration = session['duration']
             is_lab = session.get('is_lab', False)
-            allowed_days = [course.fixed_day] if course.fixed_day else days
-
+            
             valid_rooms = get_valid_rooms_for_course(course, all_active_rooms, is_lab)
             groups_to_schedule = [None]
 
@@ -377,13 +367,12 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
 
             for group_name in groups_to_schedule:
                 group_assigned = False
-                sorted_days = allowed_days
                 
-                if not course.fixed_day:
-                    sorted_days = sorted(
-                        allowed_days, 
-                        key=lambda d: constraints.batch_day_loads.get((course.department.id, course.semester.id, d.id), 0)
-                    )
+                # Dynamic load balancing applied for ALL courses now
+                sorted_days = sorted(
+                    days, 
+                    key=lambda d: constraints.batch_day_loads.get((course.department.id, course.semester.id, d.id), 0)
+                )
 
                 for day in sorted_days:
                     if group_assigned: break
@@ -418,7 +407,6 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
                             else:
                                 score += (min_dist * 20)
                                 
-                        # NEW: Small penalty if this creates a continuous 3-class block to encourage 2-class chunks
                         left_count, right_count, l_idx, r_idx = 0, 0, start_idx - 1, start_idx + duration
                         while l_idx in occupied_slots and l_idx not in constraints.lunch_indices:
                             left_count += 1; l_idx -= 1
@@ -434,10 +422,8 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
                     for i in possible_starts:
                         if group_assigned: break
                         start_slot = time_slots[i]
-                        if course.fixed_time_slot and start_slot.id != course.fixed_time_slot.id: continue
-
-                        # Pass group_name for accurate streak checking
-                        if not course.fixed_time_slot and not constraints.can_schedule_continuous(day.id, i, duration, course, group_name):
+                        
+                        if not constraints.can_schedule_continuous(day.id, i, duration, course, group_name):
                             continue
                             
                         window_slots = time_slots[i : i + duration]
@@ -458,8 +444,8 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
                             group_assigned = True
                             scheduled_count += 1
 
-                # FALLBACK LOOP
-                if not group_assigned and not course.fixed_day:
+                # FALLBACK LOOP - now unconditionally triggered if group_assigned is False
+                if not group_assigned:
                     for day in sorted_days:
                         if group_assigned: break
                         
