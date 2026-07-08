@@ -166,7 +166,6 @@ class ScheduleConstraint:
         self.batch_schedule_map[b_map_key].add(slot_idx)
 
 
-# [UPDATE] Smart Group Separation: Now separates groups at session generation to avoid fixed class double-booking
 def prepare_prioritized_sessions(courses, all_active_rooms, fixed_counts=None):
     if fixed_counts is None:
         fixed_counts = {}
@@ -187,7 +186,6 @@ def prepare_prioritized_sessions(courses, all_active_rooms, fixed_counts=None):
             fixed_bonus += 5000  
 
         for grp in groups:
-            # Check remaining credits PER GROUP
             remaining_credits = course.credits - fixed_counts.get((course.id, grp), 0)
             if remaining_credits <= 0:
                 continue  
@@ -214,18 +212,15 @@ def prepare_prioritized_sessions(courses, all_active_rooms, fixed_counts=None):
 
 
 def get_valid_rooms_for_course(course, all_active_rooms, is_lab):
-    # Rule 1: Fixed room bypasses everything
     if course.fixed_room and course.fixed_room.is_active:
         return [course.fixed_room]
 
-    # Type & Sub-type Match
     base_matching_rooms = [
         r for r in all_active_rooms
         if r.room_type_id == course.course_type_id 
         and (not course.course_sub_type_id or r.room_sub_type_id == course.course_sub_type_id)
     ]
 
-    # [UPDATE] Strict Department Rule: MUST belong to specified or target department
     dept_to_search = course.preferred_room_department or course.offering_department or course.department
     valid_rooms = [r for r in base_matching_rooms if r.department_id == dept_to_search.id]
 
@@ -233,17 +228,13 @@ def get_valid_rooms_for_course(course, all_active_rooms, is_lab):
         return []
 
     if is_lab:
-        # For labs, we prefer the largest rooms to avoid splits.
         valid_rooms.sort(key=lambda x: x.capacity, reverse=True)
         return valid_rooms
     else:
-        # [UPDATE] Fallback Max Capacity Rule for Theory
         rooms_fitting = [r for r in valid_rooms if r.capacity >= course.student_count]
         rooms_not_fitting = [r for r in valid_rooms if r.capacity < course.student_count]
         
-        # Best fits first (ascending)
         rooms_fitting.sort(key=lambda x: x.capacity)
-        # Fallback largest non-fitting first (descending)
         rooms_not_fitting.sort(key=lambda x: x.capacity, reverse=True)
         
         return rooms_fitting + rooms_not_fitting
@@ -323,6 +314,11 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
         fixed_routines_to_insert = []
         fixed_counts = {}
         
+        # [UPDATE] Moved tracking arrays here to capture fixed class drops safely
+        scheduled_count = 0
+        dropped_sessions = []
+        routines_to_create = []
+        
         for fs in fixed_schedules:
             course = fs.course
             day = fs.day
@@ -331,51 +327,52 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
             
             valid_rooms = get_valid_rooms_for_course(course, all_active_rooms, is_lab)
             
-            # [UPDATE] Smart Split Logic Implementation
             if fs.group_name:
                 groups_to_schedule = [fs.group_name]
             elif is_lab and valid_rooms and valid_rooms[0].capacity < course.student_count:
-                # Assign ONLY Group A to the fixed slot to avoid teacher clash. 
-                # Group B goes to the dynamic pool automatically!
                 groups_to_schedule = ["Group A"]
             else:
                 groups_to_schedule = [None]
                 
             for grp in groups_to_schedule:
                 assigned_room = fs.room
+                
+                # [CRITICAL FIX] If Admin's fixed room is already occupied, clear it to prevent DB crash
+                if assigned_room and constraints.is_conflict(day, slot, course, assigned_room, grp):
+                    assigned_room = None
+                    
                 if not assigned_room:
-                    # Look for non-conflicting room
+                    # Look for the best non-conflicting room
                     for r in valid_rooms:
                         if not constraints.is_conflict(day, slot, course, r, grp):
                             assigned_room = r
                             break
-                    # Fallback max capacity if nothing free
-                    if not assigned_room and valid_rooms:
-                        assigned_room = valid_rooms[0]
-                        
+                            
+                # [CRITICAL FIX] Blind fallback assignment is removed to protect DB constraint!
+                
                 if assigned_room:
                     constraints.assign(day, slot, course, assigned_room, grp)
                     fixed_routines_to_insert.append(RoutineEntry(
                         day=day, time_slot=slot, course=course, room=assigned_room, group_name=grp, is_fixed=True
                     ))
-                    # Tracking credits per group!
                     fixed_counts[(course.id, grp)] = fixed_counts.get((course.id, grp), 0) + 1
+                    scheduled_count += 1
+                else:
+                    # Fallback if no room is completely free
+                    grp_str = f" ({grp})" if grp else ""
+                    dropped_sessions.append(f"Dropped Fixed: {course.course_code}{grp_str} at {day.name} {slot.start_time} (No empty room available)")
 
         if fixed_routines_to_insert:
             RoutineEntry.objects.bulk_create(fixed_routines_to_insert)
 
-        # [UPDATE] Dynamic Scheduling - Now fetches single group per session
         sorted_sessions = prepare_prioritized_sessions(courses_to_schedule, all_active_rooms, fixed_counts)
-        
-        scheduled_count = 0
-        dropped_sessions = []
-        routines_to_create = []
+        total_required = scheduled_count + len(sorted_sessions) # Total count properly calculated
 
         for session in sorted_sessions:
             course = session['course']
             duration = session['duration']
             is_lab = session.get('is_lab', False)
-            group_name = session['group']  # Pulled directly from smart session
+            group_name = session['group']  
             
             valid_rooms = get_valid_rooms_for_course(course, all_active_rooms, is_lab)
 
@@ -515,7 +512,7 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
             transaction.set_rollback(True)
             return {
                 "status": "Warning",
-                "total_classes_required": len(sorted_sessions),
+                "total_classes_required": total_required,
                 "successful_classes": scheduled_count,
                 "dropped_classes": len(dropped_sessions),
                 "shortage_details": dropped_sessions,
@@ -526,7 +523,7 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
         
         return {
             "status": "Success",
-            "total_classes_required": len(sorted_sessions),
+            "total_classes_required": total_required,
             "successful_classes": scheduled_count,
             "dropped_classes": len(dropped_sessions),
             "shortage_details": dropped_sessions,
