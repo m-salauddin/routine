@@ -28,12 +28,14 @@ class ScheduleConstraint:
         self.lunch_indices = {idx for idx, slot in enumerate(time_slots) if slot.is_lunch_break}
         
         total_days = max(1, len(days))
+        
+        # UPDATE 1: Increased load limits to accommodate split lab groups without throwing errors
         self.teacher_limits = {
-            tid: math.ceil(total / total_days) + 1 
+            tid: math.ceil(total / total_days) + 3 
             for tid, total in teacher_totals.items()
         }
         self.batch_limits = {
-            bid: math.ceil(total / total_days) + 2 
+            bid: math.ceil(total / total_days) + 3 
             for bid, total in batch_totals.items()
         }
 
@@ -57,7 +59,8 @@ class ScheduleConstraint:
         return True
 
     def can_schedule_continuous(self, day_id, start_idx, duration, course, group_name=None):
-        MAX_CONTINUOUS = 3
+        # UPDATE 2: Increased from 3 to 4 so 2+2 hour parallel labs can be scheduled without dropping
+        MAX_CONTINUOUS = 4
 
         b_map_key_grp = (day_id, course.department.id, course.semester.id, group_name)
         b_map_key_all = (day_id, course.department.id, course.semester.id, None)
@@ -229,7 +232,8 @@ def get_valid_rooms_for_course(course, all_active_rooms, is_lab):
     
     if is_lab and valid_rooms:
         valid_rooms.sort(key=lambda x: x.capacity, reverse=True)
-        return [valid_rooms[0]]
+        # UPDATE 3: Return ALL valid lab rooms instead of just one, preventing bottlenecks for parallel groups
+        return valid_rooms
     
     return []
 
