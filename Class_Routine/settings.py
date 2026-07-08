@@ -522,7 +522,7 @@ USE_TZ = True
 # STATIC & MEDIA FILES
 # ==========================================
 # DEBUG = os.environ.get('DEBUG', 'True') == 'True'
-DEBUG = True  # Set DEBUG to True for development
+# DEBUG = True  # Set DEBUG to True for development
 STATIC_URL = '/static/'
 STATIC_ROOT = BASE_DIR / 'staticfiles'
 
