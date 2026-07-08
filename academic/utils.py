@@ -98,7 +98,8 @@ class ScheduleConstraint:
 
         return True
 
-    def is_conflict(self, day, slot, course, room, group_name=None):
+    # [UPDATE] Added is_fixed parameter to bypass theory daily limits for Fixed Classes
+    def is_conflict(self, day, slot, course, room, group_name=None, is_fixed=False):
         day_id = day.id
         constraint_type = self.batch_constraints.get((course.department.id, course.semester.id, day_id, slot.id))
         
@@ -122,7 +123,9 @@ class ScheduleConstraint:
                 return True  
 
         is_lab = course.course_type and 'lab' in course.course_type.name.lower()
-        if not is_lab and (course.id, group_name, day_id) in self.course_daily_tracker:
+        
+        # [CRITICAL FIX] If it's a fixed class, ignore the "one theory class per day" rule!
+        if not is_fixed and not is_lab and (course.id, group_name, day_id) in self.course_daily_tracker:
             return True
 
         if course.teacher:
@@ -314,7 +317,6 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
         fixed_routines_to_insert = []
         fixed_counts = {}
         
-        # [UPDATE] Moved tracking arrays here to capture fixed class drops safely
         scheduled_count = 0
         dropped_sessions = []
         routines_to_create = []
@@ -337,19 +339,16 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
             for grp in groups_to_schedule:
                 assigned_room = fs.room
                 
-                # [CRITICAL FIX] If Admin's fixed room is already occupied, clear it to prevent DB crash
-                if assigned_room and constraints.is_conflict(day, slot, course, assigned_room, grp):
+                # [UPDATE] Pass is_fixed=True for all Fixed Class conflict checks
+                if assigned_room and constraints.is_conflict(day, slot, course, assigned_room, grp, is_fixed=True):
                     assigned_room = None
                     
                 if not assigned_room:
-                    # Look for the best non-conflicting room
                     for r in valid_rooms:
-                        if not constraints.is_conflict(day, slot, course, r, grp):
+                        if not constraints.is_conflict(day, slot, course, r, grp, is_fixed=True):
                             assigned_room = r
                             break
                             
-                # [CRITICAL FIX] Blind fallback assignment is removed to protect DB constraint!
-                
                 if assigned_room:
                     constraints.assign(day, slot, course, assigned_room, grp)
                     fixed_routines_to_insert.append(RoutineEntry(
@@ -358,7 +357,6 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
                     fixed_counts[(course.id, grp)] = fixed_counts.get((course.id, grp), 0) + 1
                     scheduled_count += 1
                 else:
-                    # Fallback if no room is completely free
                     grp_str = f" ({grp})" if grp else ""
                     dropped_sessions.append(f"Dropped Fixed: {course.course_code}{grp_str} at {day.name} {slot.start_time} (No empty room available)")
 
@@ -366,7 +364,7 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
             RoutineEntry.objects.bulk_create(fixed_routines_to_insert)
 
         sorted_sessions = prepare_prioritized_sessions(courses_to_schedule, all_active_rooms, fixed_counts)
-        total_required = scheduled_count + len(sorted_sessions) # Total count properly calculated
+        total_required = scheduled_count + len(sorted_sessions)
 
         for session in sorted_sessions:
             course = session['course']
@@ -443,6 +441,7 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
                     selected_room = None
                     
                     for room in valid_rooms:
+                        # [NOTE] Dynamic classes will naturally fallback to is_fixed=False here
                         if not any(constraints.is_conflict(day, w_slot, course, room, group_name) for w_slot in window_slots):
                             selected_room = room
                             break
