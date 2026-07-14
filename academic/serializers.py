@@ -78,6 +78,7 @@ class RoomSerializer(serializers.ModelSerializer):
         ]
 
 
+
 class CourseSerializer(serializers.ModelSerializer):
     teacher_name = serializers.CharField(source='teacher.username', read_only=True)
     department_name = serializers.CharField(source='department.name', read_only=True)
@@ -87,8 +88,6 @@ class CourseSerializer(serializers.ModelSerializer):
     fixed_room_number = serializers.CharField(source='fixed_room.room_number', read_only=True)
     course_type_name = serializers.CharField(source='course_type.name', read_only=True)
     course_sub_type_name = serializers.CharField(source='course_sub_type.name', read_only=True)
-
-    # UPDATE: Removed 'fixed_day_name' completely as it no longer exists in the database.
 
     class Meta:
         model = Course
@@ -101,32 +100,57 @@ class CourseSerializer(serializers.ModelSerializer):
             'department', 'department_name',
             'semester', 'semester_name',
             'fixed_room', 'fixed_room_number'
-         
         ]
-    teacher_name = serializers.CharField(source='teacher.username', read_only=True)
-    department_name = serializers.CharField(source='department.name', read_only=True)
-    semester_name = serializers.CharField(source='semester.name', read_only=True)
-    
-    # Fetching string names for frontend convenience
-    fixed_room_number = serializers.CharField(source='fixed_room.room_number', read_only=True)
-    course_type_name = serializers.CharField(source='course_type.name', read_only=True)
-    course_sub_type_name = serializers.CharField(source='course_sub_type.name', read_only=True)
-    fixed_day_name = serializers.CharField(source='fixed_day.name', read_only=True)
 
-    class Meta:
-        model = Course
-        fields = [
-            'id', 'course_code', 'course_name', 'student_count',
-            'credits', 
-            'course_type', 'course_type_name', 
-            'course_sub_type', 'course_sub_type_name',
-            'teacher', 'teacher_name',
-            'department', 'department_name',
-            'semester', 'semester_name',
-            'fixed_room', 'fixed_room_number', 
-            'fixed_day', 'fixed_day_name', 
-            'fixed_time_slot'
-        ]
+# class CourseSerializer(serializers.ModelSerializer):
+#     teacher_name = serializers.CharField(source='teacher.username', read_only=True)
+#     department_name = serializers.CharField(source='department.name', read_only=True)
+#     semester_name = serializers.CharField(source='semester.name', read_only=True)
+    
+#     # Fetching string names for frontend convenience
+#     fixed_room_number = serializers.CharField(source='fixed_room.room_number', read_only=True)
+#     course_type_name = serializers.CharField(source='course_type.name', read_only=True)
+#     course_sub_type_name = serializers.CharField(source='course_sub_type.name', read_only=True)
+
+#     # UPDATE: Removed 'fixed_day_name' completely as it no longer exists in the database.
+
+#     class Meta:
+#         model = Course
+#         fields = [
+#             'id', 'course_code', 'course_name', 'student_count',
+#             'credits', 
+#             'course_type', 'course_type_name', 
+#             'course_sub_type', 'course_sub_type_name',
+#             'teacher', 'teacher_name',
+#             'department', 'department_name',
+#             'semester', 'semester_name',
+#             'fixed_room', 'fixed_room_number'
+         
+#         ]
+#     teacher_name = serializers.CharField(source='teacher.username', read_only=True)
+#     department_name = serializers.CharField(source='department.name', read_only=True)
+#     semester_name = serializers.CharField(source='semester.name', read_only=True)
+    
+#     # Fetching string names for frontend convenience
+#     fixed_room_number = serializers.CharField(source='fixed_room.room_number', read_only=True)
+#     course_type_name = serializers.CharField(source='course_type.name', read_only=True)
+#     course_sub_type_name = serializers.CharField(source='course_sub_type.name', read_only=True)
+#     fixed_day_name = serializers.CharField(source='fixed_day.name', read_only=True)
+
+#     class Meta:
+#         model = Course
+#         fields = [
+#             'id', 'course_code', 'course_name', 'student_count',
+#             'credits', 
+#             'course_type', 'course_type_name', 
+#             'course_sub_type', 'course_sub_type_name',
+#             'teacher', 'teacher_name',
+#             'department', 'department_name',
+#             'semester', 'semester_name',
+#             'fixed_room', 'fixed_room_number', 
+#             'fixed_day', 'fixed_day_name', 
+#             'fixed_time_slot'
+#         ]
 
 
 
