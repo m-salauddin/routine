@@ -523,6 +523,7 @@ USE_TZ = True
 # ==========================================
 # DEBUG = os.environ.get('DEBUG', 'True') == 'True'
 # DEBUG = True  # Set DEBUG to True for development
+DEBUG = False
 STATIC_URL = '/static/'
 STATIC_ROOT = BASE_DIR / 'staticfiles'
 
