@@ -111,23 +111,18 @@ class ScheduleConstraint:
         if room and (day_id, slot.id, room.id) in self.room_occupied:
             return True
             
-        # --- BATCH LEVEL COMBINED CLASS SYNCHRONIZATION ---
         b_key = (day_id, slot.id, course.department.id, course.semester.id)
         if b_key in self.batch_slot_groups:
             occupied_groups = self.batch_slot_groups[b_key]
-            # If a combined class (None) is already here, no sub-group can be scheduled
             if None in occupied_groups:
                 return True 
-            # If we want to schedule a combined class (None), but ANY sub-group is busy, block it!
             if group_name is None and len(occupied_groups) > 0:
                 return True  
-            # If this specific group is already busy
             if group_name in occupied_groups:
                 return True  
 
         is_lab = course.course_type and 'lab' in course.course_type.name.lower()
         
-        # [CRITICAL FIX] If it's a fixed class, ignore the "one theory class per day" rule!
         if not is_fixed and not is_lab and (course.id, group_name, day_id) in self.course_daily_tracker:
             return True
 
@@ -172,9 +167,11 @@ class ScheduleConstraint:
         self.batch_schedule_map[b_map_key].add(slot_idx)
 
 
-def prepare_prioritized_sessions(courses, all_active_rooms, fixed_counts=None):
+def prepare_prioritized_sessions(courses, all_active_rooms, fixed_counts=None, course_fixed_groups=None):
     if fixed_counts is None:
         fixed_counts = {}
+    if course_fixed_groups is None:
+        course_fixed_groups = {}
         
     all_sessions = []
     for course in courses:
@@ -182,9 +179,13 @@ def prepare_prioritized_sessions(courses, all_active_rooms, fixed_counts=None):
         valid_rooms = get_valid_rooms_for_course(course, all_active_rooms, is_lab_course)
         
         groups = [None]
-        if is_lab_course and valid_rooms and valid_rooms[0].capacity < course.student_count:
-            num_groups = math.ceil(course.student_count / valid_rooms[0].capacity)
-            groups = [f"Group {chr(65+i)}" for i in range(num_groups)]
+        if is_lab_course:
+            # Check if this course is explicitly marked as combined in Fixed tables
+            if course.id in course_fixed_groups and None in course_fixed_groups[course.id]:
+                groups = [None]
+            elif valid_rooms and valid_rooms[0].capacity < course.student_count:
+                num_groups = math.ceil(course.student_count / valid_rooms[0].capacity)
+                groups = [f"Group {chr(65+i)}" for i in range(num_groups)]
             
         total_credits = course.credits if course.credits > 0 else 1
         fixed_bonus = 1000 if course.fixed_room else 0
@@ -213,9 +214,6 @@ def prepare_prioritized_sessions(courses, all_active_rooms, fixed_counts=None):
                     all_sessions.append({'course': course, 'group': grp, 'duration': 1, 'priority_score': (credits_filled / total_credits) + fixed_bonus, 'is_lab': False})
 
     random.shuffle(all_sessions)
-    
-    # [UPDATE] Now sorts by Priority -> Duration -> Department -> Semester
-    # This ensures that when Group A is processed, Group B is processed immediately after!
     all_sessions.sort(key=lambda x: (
         x['priority_score'], 
         -x['duration'],
@@ -243,14 +241,15 @@ def get_valid_rooms_for_course(course, all_active_rooms, is_lab):
         return []
 
     if is_lab:
+        # Sorts by capacity descending (biggest room first) - exactly as requested
         valid_rooms.sort(key=lambda x: x.capacity, reverse=True)
         return valid_rooms
     else:
         rooms_fitting = [r for r in valid_rooms if r.capacity >= course.student_count]
         rooms_not_fitting = [r for r in valid_rooms if r.capacity < course.student_count]
         
-        rooms_fitting.sort(key=lambda x: x.capacity)
-        rooms_not_fitting.sort(key=lambda x: x.capacity, reverse=True)
+        rooms_fitting.sort(key=lambda x: x.capacity) # Smallest room that fits
+        rooms_not_fitting.sort(key=lambda x: x.capacity, reverse=True) # Biggest room available if none fits
         
         return rooms_fitting + rooms_not_fitting
 
@@ -269,9 +268,11 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
         if semester_id:
             courses_to_schedule = list(base_courses.filter(semester_id=semester_id))
             old_routines = RoutineEntry.objects.filter(course__department_id=department_id, course__semester_id=semester_id)
+            fixed_schedules = FixedClassSchedule.objects.filter(course__department_id=department_id, course__semester_id=semester_id)
         else:
             courses_to_schedule = list(base_courses)
             old_routines = RoutineEntry.objects.filter(course__department_id=department_id)
+            fixed_schedules = FixedClassSchedule.objects.filter(course__department_id=department_id)
 
         if old_routines.exists():
             backup_list = [{
@@ -296,6 +297,13 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
                 continue
             batch_constraints_dict[key] = c.constraint_type
 
+        # Track which classes have been explicitly grouped in the Fixed schedules
+        course_fixed_groups = {}
+        for fs in fixed_schedules:
+            if fs.course_id not in course_fixed_groups:
+                course_fixed_groups[fs.course_id] = set()
+            course_fixed_groups[fs.course_id].add(fs.group_name)
+
         teacher_totals = {}
         batch_totals = {}
         
@@ -304,8 +312,11 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
             valid_rooms = get_valid_rooms_for_course(c, all_active_rooms, is_lab)
             
             num_groups = 1
-            if is_lab and valid_rooms and valid_rooms[0].capacity < c.student_count:
-                num_groups = math.ceil(c.student_count / valid_rooms[0].capacity)
+            if is_lab:
+                if c.id in course_fixed_groups and None in course_fixed_groups[c.id]:
+                    num_groups = 1
+                elif valid_rooms and valid_rooms[0].capacity < c.student_count:
+                    num_groups = math.ceil(c.student_count / valid_rooms[0].capacity)
                 
             total_teacher_credits = c.credits * num_groups
             
@@ -321,11 +332,6 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
         for r in existing_routines:
             constraints.assign(r.day, r.time_slot, r.course, r.room, r.group_name)
 
-        if semester_id:
-            fixed_schedules = FixedClassSchedule.objects.filter(course__department_id=department_id, course__semester_id=semester_id)
-        else:
-            fixed_schedules = FixedClassSchedule.objects.filter(course__department_id=department_id)
-            
         fixed_routines_to_insert = []
         fixed_counts = {}
         
@@ -341,17 +347,12 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
             
             valid_rooms = get_valid_rooms_for_course(course, all_active_rooms, is_lab)
             
-            if fs.group_name:
-                groups_to_schedule = [fs.group_name]
-            elif is_lab and valid_rooms and valid_rooms[0].capacity < course.student_count:
-                groups_to_schedule = ["Group A"]
-            else:
-                groups_to_schedule = [None]
+            # [CRITICAL UPDATE] Only schedule the exact group specified by the admin!
+            groups_to_schedule = [fs.group_name]
                 
             for grp in groups_to_schedule:
                 assigned_room = fs.room
                 
-                # [UPDATE] Pass is_fixed=True for all Fixed Class conflict checks
                 if assigned_room and constraints.is_conflict(day, slot, course, assigned_room, grp, is_fixed=True):
                     assigned_room = None
                     
@@ -370,12 +371,12 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
                     scheduled_count += 1
                 else:
                     grp_str = f" ({grp})" if grp else ""
-                    dropped_sessions.append(f"Dropped Fixed: {course.course_code}{grp_str} at {day.name} {slot.start_time} (No empty room available)")
+                    dropped_sessions.append(f"Dropped Fixed: {course.course_code}{grp_str} at {day.name} {slot.start_time} (No available room)")
 
         if fixed_routines_to_insert:
             RoutineEntry.objects.bulk_create(fixed_routines_to_insert)
 
-        sorted_sessions = prepare_prioritized_sessions(courses_to_schedule, all_active_rooms, fixed_counts)
+        sorted_sessions = prepare_prioritized_sessions(courses_to_schedule, all_active_rooms, fixed_counts, course_fixed_groups)
         total_required = scheduled_count + len(sorted_sessions)
 
         for session in sorted_sessions:
@@ -438,8 +439,6 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
                     if left_count + duration + right_count == 3:
                         score += 15
                         
-                    # --- PARALLEL GROUP SYNCHRONIZATION LOGIC ---
-                    # If Group B is being scheduled, heavily favor slots where Group A is already busy
                     if group_name is not None:
                         parallel_bonus = 0
                         for w_slot in time_slots[start_idx : start_idx + duration]:
@@ -447,7 +446,7 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
                             groups_here = constraints.batch_slot_groups.get(check_key, set())
                             sibling_groups = [g for g in groups_here if g is not None and g != group_name]
                             if sibling_groups:
-                                parallel_bonus += 300  # Massive boost (+300 per slot) to enforce parallel lab execution
+                                parallel_bonus += 300  
                         score += parallel_bonus
                     
                     return score
@@ -479,7 +478,6 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
                         group_assigned = True
                         scheduled_count += 1
 
-            # FALLBACK LOOP
             if not group_assigned:
                 for day in sorted_days:
                     if group_assigned: break
@@ -503,7 +501,6 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
                             if min_dist == 0: score -= 50
                             else: score += (min_dist * 20)
                             
-                        # --- PARALLEL GROUP SYNCHRONIZATION LOGIC (Fallback) ---
                         if group_name is not None:
                             parallel_bonus = 0
                             for w_slot in time_slots[start_idx : start_idx + duration]:
