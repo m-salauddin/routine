@@ -98,7 +98,6 @@ class ScheduleConstraint:
 
         return True
 
-    # [UPDATE] Added is_fixed parameter to bypass theory daily limits for Fixed Classes
     def is_conflict(self, day, slot, course, room, group_name=None, is_fixed=False):
         day_id = day.id
         constraint_type = self.batch_constraints.get((course.department.id, course.semester.id, day_id, slot.id))
@@ -112,13 +111,17 @@ class ScheduleConstraint:
         if room and (day_id, slot.id, room.id) in self.room_occupied:
             return True
             
+        # --- BATCH LEVEL COMBINED CLASS SYNCHRONIZATION ---
         b_key = (day_id, slot.id, course.department.id, course.semester.id)
         if b_key in self.batch_slot_groups:
             occupied_groups = self.batch_slot_groups[b_key]
+            # If a combined class (None) is already here, no sub-group can be scheduled
             if None in occupied_groups:
                 return True 
+            # If we want to schedule a combined class (None), but ANY sub-group is busy, block it!
             if group_name is None and len(occupied_groups) > 0:
                 return True  
+            # If this specific group is already busy
             if group_name in occupied_groups:
                 return True  
 
@@ -210,7 +213,16 @@ def prepare_prioritized_sessions(courses, all_active_rooms, fixed_counts=None):
                     all_sessions.append({'course': course, 'group': grp, 'duration': 1, 'priority_score': (credits_filled / total_credits) + fixed_bonus, 'is_lab': False})
 
     random.shuffle(all_sessions)
-    all_sessions.sort(key=lambda x: (x['priority_score'], -x['duration']), reverse=True)
+    
+    # [UPDATE] Now sorts by Priority -> Duration -> Department -> Semester
+    # This ensures that when Group A is processed, Group B is processed immediately after!
+    all_sessions.sort(key=lambda x: (
+        x['priority_score'], 
+        -x['duration'],
+        x['course'].department.id,
+        x['course'].semester.id if x['course'].semester else 0
+    ), reverse=True)
+    
     return all_sessions
 
 
@@ -425,10 +437,22 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
                         right_count += 1; r_idx += 1
                     if left_count + duration + right_count == 3:
                         score += 15
+                        
+                    # --- PARALLEL GROUP SYNCHRONIZATION LOGIC ---
+                    # If Group B is being scheduled, heavily favor slots where Group A is already busy
+                    if group_name is not None:
+                        parallel_bonus = 0
+                        for w_slot in time_slots[start_idx : start_idx + duration]:
+                            check_key = (day.id, w_slot.id, course.department.id, course.semester.id)
+                            groups_here = constraints.batch_slot_groups.get(check_key, set())
+                            sibling_groups = [g for g in groups_here if g is not None and g != group_name]
+                            if sibling_groups:
+                                parallel_bonus += 300  # Massive boost (+300 per slot) to enforce parallel lab execution
+                        score += parallel_bonus
                     
                     return score
 
-                possible_starts.sort(key=lambda idx: calculate_slot_score(idx))
+                possible_starts.sort(key=lambda idx: calculate_slot_score(idx), reverse=True)
 
                 for i in possible_starts:
                     if group_assigned: break
@@ -441,7 +465,6 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
                     selected_room = None
                     
                     for room in valid_rooms:
-                        # [NOTE] Dynamic classes will naturally fallback to is_fixed=False here
                         if not any(constraints.is_conflict(day, w_slot, course, room, group_name) for w_slot in window_slots):
                             selected_room = room
                             break
@@ -479,9 +502,21 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
                                 if dist < min_dist: min_dist = dist
                             if min_dist == 0: score -= 50
                             else: score += (min_dist * 20)
+                            
+                        # --- PARALLEL GROUP SYNCHRONIZATION LOGIC (Fallback) ---
+                        if group_name is not None:
+                            parallel_bonus = 0
+                            for w_slot in time_slots[start_idx : start_idx + duration]:
+                                check_key = (day.id, w_slot.id, course.department.id, course.semester.id)
+                                groups_here = constraints.batch_slot_groups.get(check_key, set())
+                                sibling_groups = [g for g in groups_here if g is not None and g != group_name]
+                                if sibling_groups:
+                                    parallel_bonus += 300  
+                            score += parallel_bonus
+                            
                         return score
 
-                    possible_starts.sort(key=lambda idx: calculate_fallback_score(idx))
+                    possible_starts.sort(key=lambda idx: calculate_fallback_score(idx), reverse=True)
 
                     for i in possible_starts:
                         if group_assigned: break
