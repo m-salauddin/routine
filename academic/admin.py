@@ -10,6 +10,9 @@ from django.shortcuts import redirect
 from django.contrib import messages
 from django.http import HttpResponseRedirect
 from django.urls import reverse
+from .models import Notice
+
+admin.site.register(Notice)
 
 
 from .models import (

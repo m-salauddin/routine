@@ -7,8 +7,6 @@ from django.core import serializers
 import json
 import tablib
 import datetime
-from .models import RoutineEntry, ActivityLog, SystemSetting
-
 from drf_yasg.utils import swagger_auto_schema
 from drf_yasg import openapi
 from rest_framework.views import APIView
@@ -16,10 +14,12 @@ from rest_framework.response import Response
 from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
 from .models import RoutineEntry
+from rest_framework.views import APIView
+from rest_framework.response import Response
+from rest_framework import status
+from rest_framework.permissions import IsAuthenticated
+from django.db.models import Q
 
-
-from .models import Notification
-from .serializers import NotificationSerializer
 
 from rest_framework import viewsets, status
 from rest_framework.views import APIView
@@ -36,17 +36,16 @@ from user_api.admin import UserResource
 from .models import (
     Department, Semester, Course, TimeSlot, RoutineEntry, Room, 
     RoomType, RoomSubType, Day, BatchTimeConstraint, SystemBackup, Batch,
-    TemporarySwapRequest
+    TemporarySwapRequest,FixedClassSchedule,Notification,RoutineEntry, ActivityLog, SystemSetting
+
 )
 from .utils import generate_routine_algorithm, rollback_routine_algorithm
 from .serializers import (
-    DepartmentSerializer, SemesterSerializer, CourseSerializer, 
-    TimeSlotSerializer, RoutineEntrySerializer, RoomSerializer
+    DepartmentSerializer, SemesterSerializer, CourseSerializer, NotificationSerializer,
+    TimeSlotSerializer, RoutineEntrySerializer, RoomSerializer,FixedClassScheduleSerializer,NoticeSerializer,Notice
 )
 
 from user_api.permissions import IsAdminUser
-
-
 
 User = get_user_model()
 
@@ -57,12 +56,21 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
-from drf_yasg.utils import swagger_auto_schema
+
 from drf_yasg import openapi
 from django.shortcuts import get_object_or_404
 
-from .models import FixedClassSchedule
-from .serializers import FixedClassScheduleSerializer
+
+
+RESOURCE_MAP = {
+    'user': UserResource,
+    'course': CourseResource,
+    'room': RoomResource,
+    'department': DepartmentResource,
+    'batch': BatchResource,
+    'routine': RoutineEntryResource,
+}
+
 
 class FixedClassScheduleListCreateView(APIView):
     permission_classes = [IsAuthenticated]
@@ -159,7 +167,6 @@ class SemesterViewSet(viewsets.ModelViewSet):
 
 
 class CourseViewSet(viewsets.ModelViewSet):
-    # UPDATE: select_related যোগ করা হয়েছে N+1 কোয়েরি প্রবলেম সমাধান করার জন্য
     queryset = Course.objects.select_related(
         'teacher', 'department', 'semester', 'fixed_room'
     ).filter(is_active=True)
@@ -181,6 +188,140 @@ class RoomViewSet(viewsets.ModelViewSet):
 # ==============================================================================
 # TEMPORARY SWAP REQUEST MANAGEMENT
 # ==============================================================================
+
+# ==============================================================================
+# ROUTINE GENERATION & MANAGEMENT APIs
+# ==============================================================================
+
+# class TeacherSwapRequestView(APIView):
+#     permission_classes = [IsAuthenticated]
+
+#     @swagger_auto_schema(
+#         tags=['3. Teacher Operations'],
+#         operation_description="**[TEACHER ONLY]** Request a temporary class swap (PROXY or MUTUAL).",
+#         request_body=openapi.Schema(
+#             type=openapi.TYPE_OBJECT,
+#             required=['swap_type', 'target_teacher_id', 'requester_routine_id', 'swap_date'],
+#             properties={
+#                 'swap_type': openapi.Schema(type=openapi.TYPE_STRING, description="'PROXY' or 'MUTUAL'", default='PROXY'),
+#                 'target_teacher_id': openapi.Schema(type=openapi.TYPE_INTEGER, description="ID of the teacher you are requesting", default=1),
+#                 'requester_routine_id': openapi.Schema(type=openapi.TYPE_INTEGER, description="Your routine ID", default=10),
+#                 'target_routine_id': openapi.Schema(type=openapi.TYPE_INTEGER, description="Target routine ID (Required only for MUTUAL)", default=15),
+#                 'swap_date': openapi.Schema(type=openapi.TYPE_STRING, format=openapi.FORMAT_DATE, description="Format: YYYY-MM-DD", default="2026-06-25"),
+#                 'reason': openapi.Schema(type=openapi.TYPE_STRING, description="Reason for the swap", default="Medical Emergency"),
+#             }
+#         ),
+#         responses={200: "Success", 400: "Bad Request (Conflict/Errors)", 403: "Forbidden"}
+#     )
+#     def post(self, request):
+#         user = request.user
+#         if getattr(user, 'role', '') != 'TEACHER':
+#             return Response({"error": "Only teachers can request swaps."}, status=status.HTTP_403_FORBIDDEN)
+
+#         swap_type = request.data.get('swap_type')
+#         target_teacher_id = request.data.get('target_teacher_id')
+#         requester_routine_id = request.data.get('requester_routine_id')
+#         target_routine_id = request.data.get('target_routine_id')
+#         swap_date_str = request.data.get('swap_date')
+#         reason = request.data.get('reason', '')
+
+#         try:
+#             swap_date = datetime.datetime.strptime(swap_date_str, '%Y-%m-%d').date()
+#             req_routine = RoutineEntry.objects.get(id=requester_routine_id, is_active=True)
+#             target_teacher = User.objects.get(id=target_teacher_id, role='TEACHER')
+
+#             if req_routine.course.teacher != user:
+#                 return Response({"error": "You can only swap your own classes."}, status=status.HTTP_403_FORBIDDEN)
+
+#             if swap_type == 'PROXY':
+#                 conflict = RoutineEntry.objects.filter(
+#                     day=req_routine.day,
+#                     time_slot=req_routine.time_slot,
+#                     course__teacher=target_teacher,
+#                     is_active=True
+#                 ).exists()
+#                 if conflict:
+#                     return Response({"error": f"{target_teacher.username} already has a class at this time!"}, status=status.HTTP_400_BAD_REQUEST)
+
+#                 req = TemporarySwapRequest.objects.create(
+#                     swap_type='PROXY', requester=user, target_teacher=target_teacher,
+#                     requester_routine=req_routine, swap_date=swap_date, reason=reason
+#                 )
+
+#             elif swap_type == 'MUTUAL':
+#                 if not target_routine_id:
+#                     return Response({"error": "target_routine_id is required for MUTUAL swap."}, status=status.HTTP_400_BAD_REQUEST)
+
+#                 tgt_routine = RoutineEntry.objects.get(id=target_routine_id, is_active=True)
+#                 if tgt_routine.course.teacher != target_teacher:
+#                     return Response({"error": "Target routine does not belong to the target teacher."}, status=status.HTTP_400_BAD_REQUEST)
+
+#                 conflict1 = RoutineEntry.objects.filter(
+#                     day=tgt_routine.day, time_slot=tgt_routine.time_slot, course__teacher=user, is_active=True
+#                 ).exists()
+#                 conflict2 = RoutineEntry.objects.filter(
+#                     day=req_routine.day, time_slot=req_routine.time_slot, course__teacher=target_teacher, is_active=True
+#                 ).exists()
+
+#                 if conflict1 or conflict2:
+#                     return Response({"error": "Mutual swap causes a timetable conflict for one or both teachers."}, status=status.HTTP_400_BAD_REQUEST)
+
+#                 req = TemporarySwapRequest.objects.create(
+#                     swap_type='MUTUAL', requester=user, target_teacher=target_teacher,
+#                     requester_routine=req_routine, target_routine=tgt_routine,
+#                     swap_date=swap_date, reason=reason
+#                 )
+#             else:
+#                 return Response({"error": "Invalid swap_type."}, status=status.HTTP_400_BAD_REQUEST)
+
+#             return Response({"status": "Success", "message": "Swap request sent successfully!", "request_id": req.id})
+
+#         except Exception as e:
+#             return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+#     @swagger_auto_schema(
+#         tags=['3. Teacher Operations'],
+#         operation_description="**[TEACHER ONLY]** Accept or Reject a pending swap request.",
+#         request_body=openapi.Schema(
+#             type=openapi.TYPE_OBJECT,
+#             required=['request_id', 'action'],
+#             properties={
+#                 'request_id': openapi.Schema(type=openapi.TYPE_INTEGER, description="ID of the swap request", default=1),
+#                 'action': openapi.Schema(type=openapi.TYPE_STRING, description="'ACCEPT' or 'REJECT'", default="ACCEPT"),
+#             }
+#         ),
+#         responses={200: "Success", 400: "Bad Request", 404: "Not Found"}
+#     )
+#     def put(self, request):
+#         user = request.user
+#         request_id = request.data.get('request_id')
+#         action = request.data.get('action')
+
+#         try:
+#             swap_req = TemporarySwapRequest.objects.get(id=request_id, target_teacher=user, status='PENDING')
+#             if action == 'ACCEPT':
+#                 swap_req.status = 'ACCEPTED'
+#                 swap_req.save()
+#                 return Response({"status": "Success", "message": "Swap request ACCEPTED."})
+#             elif action == 'REJECT':
+#                 swap_req.status = 'REJECTED'
+#                 swap_req.save()
+#                 return Response({"status": "Success", "message": "Swap request REJECTED."})
+#             else:
+#                 return Response({"error": "Invalid action."}, status=status.HTTP_400_BAD_REQUEST)
+#         except TemporarySwapRequest.DoesNotExist:
+#             return Response({"error": "Pending request not found or you are not authorized."}, status=status.HTTP_404_NOT_FOUND)
+
+
+from datetime import datetime
+from rest_framework.views import APIView
+from rest_framework.response import Response
+from rest_framework import status
+from rest_framework.permissions import IsAuthenticated
+
+from drf_yasg import openapi
+
+
 class TeacherSwapRequestView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -214,12 +355,15 @@ class TeacherSwapRequestView(APIView):
         reason = request.data.get('reason', '')
 
         try:
-            swap_date = datetime.datetime.strptime(swap_date_str, '%Y-%m-%d').date()
+            swap_date = datetime.strptime(swap_date_str, '%Y-%m-%d').date()
             req_routine = RoutineEntry.objects.get(id=requester_routine_id, is_active=True)
             target_teacher = User.objects.get(id=target_teacher_id, role='TEACHER')
 
             if req_routine.course.teacher != user:
                 return Response({"error": "You can only swap your own classes."}, status=status.HTTP_403_FORBIDDEN)
+
+            # কোর্সের বেসিক ইনফরমেশন যা নোটিফিকেশনে পাঠানো হবে
+            req_course_info = f"{req_routine.course.course_code} on {req_routine.day.name} at {req_routine.time_slot.start_time.strftime('%I:%M %p')}"
 
             if swap_type == 'PROXY':
                 conflict = RoutineEntry.objects.filter(
@@ -235,6 +379,10 @@ class TeacherSwapRequestView(APIView):
                     swap_type='PROXY', requester=user, target_teacher=target_teacher,
                     requester_routine=req_routine, swap_date=swap_date, reason=reason
                 )
+
+                # PROXY Notification
+                msg = f"{user.username} requested you to take their class ({req_course_info}) on Date: {swap_date}. Reason: {reason}"
+                title = f"PROXY Swap Request from {user.username}"
 
             elif swap_type == 'MUTUAL':
                 if not target_routine_id:
@@ -259,8 +407,24 @@ class TeacherSwapRequestView(APIView):
                     requester_routine=req_routine, target_routine=tgt_routine,
                     swap_date=swap_date, reason=reason
                 )
+
+                # MUTUAL Notification
+                tgt_course_info = f"{tgt_routine.course.course_code} at {tgt_routine.time_slot.start_time.strftime('%I:%M %p')}"
+                msg = f"{user.username} proposed a MUTUAL swap. Exchange your class ({tgt_course_info}) with their class ({req_course_info}) on Date: {swap_date}. Reason: {reason}"
+                title = f"MUTUAL Swap Request from {user.username}"
+
             else:
                 return Response({"error": "Invalid swap_type."}, status=status.HTTP_400_BAD_REQUEST)
+
+            # [NEW] টার্গেট টিচারের কাছে ডিটেইলড নোটিফিকেশন পাঠানো হচ্ছে
+            Notification.objects.create(
+                recipient=target_teacher,
+                sender=user,
+                notification_type='SWAP_REQ',
+                title=title,
+                message=msg,
+                action_url=f"/dashboard/swap-requests?request_id={req.id}"
+            )
 
             return Response({"status": "Success", "message": "Swap request sent successfully!", "request_id": req.id})
 
@@ -287,23 +451,43 @@ class TeacherSwapRequestView(APIView):
 
         try:
             swap_req = TemporarySwapRequest.objects.get(id=request_id, target_teacher=user, status='PENDING')
+            course_code = swap_req.requester_routine.course.course_code
+
             if action == 'ACCEPT':
                 swap_req.status = 'ACCEPTED'
                 swap_req.save()
+
+                # রিকোয়েস্ট অ্যাকসেপ্ট হলে অরিজিনাল টিচারকে নোটিফিকেশন পাঠানো
+                Notification.objects.create(
+                    recipient=swap_req.requester,
+                    sender=user,
+                    notification_type='SWAP_ACC',
+                    title='Swap Request Accepted 🎉',
+                    message=f"{user.username} has ACCEPTED your {swap_req.swap_type} swap request for {course_code} on {swap_req.swap_date}.",
+                    action_url="/dashboard/teachers-routine"
+                )
                 return Response({"status": "Success", "message": "Swap request ACCEPTED."})
+            
             elif action == 'REJECT':
                 swap_req.status = 'REJECTED'
                 swap_req.save()
+
+                
+                Notification.objects.create(
+                    recipient=swap_req.requester,
+                    sender=user,
+                    notification_type='SWAP_REJ',
+                    title='Swap Request Rejected ❌',
+                    message=f"{user.username} has REJECTED your {swap_req.swap_type} swap request for {course_code} on {swap_req.swap_date}.",
+                    action_url="/dashboard/teachers-routine"
+                )
                 return Response({"status": "Success", "message": "Swap request REJECTED."})
+            
             else:
                 return Response({"error": "Invalid action."}, status=status.HTTP_400_BAD_REQUEST)
         except TemporarySwapRequest.DoesNotExist:
             return Response({"error": "Pending request not found or you are not authorized."}, status=status.HTTP_404_NOT_FOUND)
 
-
-# ==============================================================================
-# ROUTINE GENERATION & MANAGEMENT APIs
-# ==============================================================================
 class GenerateRoutineView(APIView):
     permission_classes = [IsAdminUser]
     
@@ -544,9 +728,171 @@ class RoutineListView(APIView):
         return Response(modified_data)
 
 
+class DepartmentRoutineView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    @swagger_auto_schema(
+        tags=['3. Teacher Dashboard'],
+        operation_description="**[TEACHER ONLY]** Get the complete routine for the teacher's department (includes targeted courses, offered courses, and cross-department classes by colleagues).",
+        responses={200: "Success"}
+    )
+    def get(self, request):
+        user = request.user
+
+
+        if user.role != 'TEACHER':
+            return Response({"error": "Shudhumatro Teacher ra ei API access korte parben."}, status=status.HTTP_403_FORBIDDEN)
+        
+        if not user.department:
+            return Response({"error": "Apnar profile e kono department assign kora nei."}, status=status.HTTP_400_BAD_REQUEST)
+
+        teacher_dept = user.department
+
+        routines = RoutineEntry.objects.filter(
+            Q(course__department=teacher_dept) |                 
+            Q(course__offering_department=teacher_dept) |         
+            Q(course__teacher__department=teacher_dept)          
+        ).select_related('day', 'time_slot', 'course', 'room').distinct()
+
+        
+        serializer = RoutineEntrySerializer(routines, many=True)
+
+        return Response({
+            "status": "success",
+            "department": teacher_dept.name,
+            "total_classes": routines.count(),
+            "data": serializer.data
+        }, status=status.HTTP_200_OK)
+    
+
+
+
 # ==============================================================================
 # TEACHER PANEL: CANCEL, REACTIVATE & UPDATE CLASS
 # ==============================================================================
+
+
+
+def notify_students_about_class(entry, action, actor, custom_message=""):
+    """
+    Helper function to send bulk notifications to students when a class is cancelled, reactivated, or updated.
+    """
+    
+    target_students = User.objects.filter(
+        role='STUDENT',
+        department=entry.course.department,
+        semester=entry.course.semester,
+        is_active=True
+    )
+
+    if not target_students.exists():
+        return 
+
+   
+    course_info = f"{entry.course.course_code} ({entry.course.course_name})"
+    day_time = f"{entry.day.name} at {entry.time_slot}"
+    
+    title = ""
+    message = ""
+
+    if action == 'cancel':
+        title = f"Class Cancelled: {entry.course.course_code}"
+        message = f"Your class for {course_info} on {day_time} has been cancelled.\nReason: {custom_message}"
+    elif action == 'reactivate':
+        title = f"Class Reactivated: {entry.course.course_code}"
+        message = f"Good news! Your cancelled class for {course_info} on {day_time} has been reactivated and will be held as scheduled."
+    elif action == 'update':
+        title = f"Update on Cancelled Class: {entry.course.course_code}"
+        message = f"There is an update regarding the cancelled class for {course_info} on {day_time}.\nUpdated Reason: {custom_message}"
+
+    
+    notifications_to_create = []
+    for student in target_students:
+        notifications_to_create.append(
+            Notification(
+                recipient=student,
+                sender=actor,
+                notification_type='CLASS_DEL',
+                title=title,
+                message=message,
+                action_url="/dashboard/students-routine" 
+            )
+        )
+    
+    if notifications_to_create:
+        Notification.objects.bulk_create(notifications_to_create)
+
+
+
+class AdminCancelClassView(APIView):
+    permission_classes = [IsAdminUser]
+
+    @swagger_auto_schema(
+        tags=['4. Enterprise Operations'], 
+        request_body=openapi.Schema(
+            type=openapi.TYPE_OBJECT,
+            properties={
+                'action': openapi.Schema(
+                    type=openapi.TYPE_STRING, 
+                    description="Action type: 'cancel', 'reactivate', or 'update'"
+                ),
+                'cancel_message': openapi.Schema(
+                    type=openapi.TYPE_STRING, 
+                    description="Required for 'cancel' and 'update' actions."
+                ),
+            },
+            required=['action']
+        ),
+        operation_description="**[ADMIN ONLY]** Temporarily cancel ANY class, reactivate an off class, or update the cancel message."
+    )
+    def post(self, request, entry_id):
+        try:
+            entry = RoutineEntry.objects.get(id=entry_id)
+        except RoutineEntry.DoesNotExist:
+            return Response({"error": "Routine entry not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        action = request.data.get('action')
+
+        if action == 'cancel':
+            cancel_message = request.data.get('cancel_message', 'Class temporarily cancelled by Administration.')
+            entry.is_cancelled = True
+            entry.cancel_message = cancel_message
+            entry.save()
+            
+            ActivityLog.objects.create(actor=request.user, action_description=f"ADMIN CANCELLED class: {entry.course.course_name} on {entry.day.name}.", severity='WARNING')
+            notify_students_about_class(entry, 'cancel', request.user, cancel_message) # [NEW] Notification Call
+            
+            return Response({"status": "success", "message": "Class cancelled successfully by Admin.", "cancel_message": cancel_message})
+
+        elif action == 'reactivate':
+            entry.is_cancelled = False
+            entry.cancel_message = None
+            entry.save()
+            
+            ActivityLog.objects.create(actor=request.user, action_description=f"ADMIN REACTIVATED class: {entry.course.course_name} on {entry.day.name}.", severity='SUCCESS')
+            notify_students_about_class(entry, 'reactivate', request.user) # [NEW] Notification Call
+            
+            return Response({"status": "success", "message": "Class reactivated successfully by Admin."})
+
+        elif action == 'update':
+            if not entry.is_cancelled:
+                return Response({"error": "Cannot update message. The class is not cancelled yet."}, status=status.HTTP_400_BAD_REQUEST)
+            
+            new_cancel_message = request.data.get('cancel_message', '')
+            if not new_cancel_message:
+                return Response({"error": "Cancel message cannot be empty for update action."}, status=status.HTTP_400_BAD_REQUEST)
+                
+            entry.cancel_message = new_cancel_message
+            entry.save()
+            
+            ActivityLog.objects.create(actor=request.user, action_description=f"ADMIN UPDATED cancellation message for: {entry.course.course_name}.", severity='INFO')
+            notify_students_about_class(entry, 'update', request.user, new_cancel_message) # [NEW] Notification Call
+            
+            return Response({"status": "success", "message": "Cancellation message updated successfully by Admin.", "cancel_message": new_cancel_message})
+
+        else:
+            return Response({"error": "Invalid action. Please use 'cancel', 'reactivate', or 'update'."}, status=status.HTTP_400_BAD_REQUEST)
+        
 
 class TeacherCancelClassView(APIView):
     permission_classes = [IsAuthenticated]
@@ -571,71 +917,358 @@ class TeacherCancelClassView(APIView):
     )
     def post(self, request, entry_id):
         try:
-            # Check if the entry exists and belongs to the logged-in teacher
             entry = RoutineEntry.objects.get(id=entry_id, course__teacher=request.user)
         except RoutineEntry.DoesNotExist:
-            return Response(
-                {"error": "Routine entry not found or you don't have permission to modify this class."}, 
-                status=status.HTTP_404_NOT_FOUND
-            )
+            return Response({"error": "Routine entry not found or you don't have permission to modify this class."}, status=status.HTTP_404_NOT_FOUND)
 
         action = request.data.get('action')
 
-        # ১. class cancel logic
         if action == 'cancel':
             cancel_message = request.data.get('cancel_message', 'Class cancelled by teacher.')
             entry.is_cancelled = True
             entry.cancel_message = cancel_message
             entry.save()
-            ActivityLog.objects.create(actor=request.user,action_description=f"CANCELLED class: {entry.course.course_name} on {entry.day.name}.", severity='WARNING')
-            return Response({
-                "status": "success",
-                "message": "Class cancelled successfully.", 
-                "cancel_message": cancel_message
-            })
-        
+            
+            ActivityLog.objects.create(actor=request.user, action_description=f"CANCELLED class: {entry.course.course_name} on {entry.day.name}.", severity='WARNING')
+            notify_students_about_class(entry, 'cancel', request.user, cancel_message) # [NEW] Notification Call
+            
+            return Response({"status": "success", "message": "Class cancelled successfully.", "cancel_message": cancel_message})
 
-        # ২. again class re-activate
         elif action == 'reactivate':
             entry.is_cancelled = False
-            entry.cancel_message = None  # Remove the cancellation message when reactivating
+            entry.cancel_message = None 
             entry.save()
+            
             ActivityLog.objects.create(actor=request.user, action_description=f"REACTIVATED class: {entry.course.course_name} on {entry.day.name}.", severity='SUCCESS')
-            return Response({
-                "status": "success",
-                "message": "Class reactivated successfully. The cancellation message has been removed."
-            })
+            notify_students_about_class(entry, 'reactivate', request.user) # [NEW] Notification Call
+            
+            return Response({"status": "success", "message": "Class reactivated successfully. The cancellation message has been removed."})
 
-        # ৩. off class massage update logic
         elif action == 'update':
             if not entry.is_cancelled:
-                return Response(
-                    {"error": "Cannot update message. The class is not cancelled yet."}, 
-                    status=status.HTTP_400_BAD_REQUEST
-                )
+                return Response({"error": "Cannot update message. The class is not cancelled yet."}, status=status.HTTP_400_BAD_REQUEST)
             
             new_cancel_message = request.data.get('cancel_message', '')
             if not new_cancel_message:
-                return Response(
-                    {"error": "Cancel message cannot be empty for update action."}, 
-                    status=status.HTTP_400_BAD_REQUEST
-                )
+                return Response({"error": "Cancel message cannot be empty for update action."}, status=status.HTTP_400_BAD_REQUEST)
                 
             entry.cancel_message = new_cancel_message
             entry.save()
+            
             ActivityLog.objects.create(actor=request.user, action_description=f"UPDATED cancellation message for: {entry.course.course_name}.", severity='INFO')
-            return Response({
-                "status": "success",
-                "message": "Cancellation message updated successfully.", 
-                "cancel_message": new_cancel_message
-            })
+            notify_students_about_class(entry, 'update', request.user, new_cancel_message) # [NEW] Notification Call
+            
+            return Response({"status": "success", "message": "Cancellation message updated successfully.", "cancel_message": new_cancel_message})
 
-        # if the action is none of the above, return an error
         else:
-            return Response(
-                {"error": "Invalid action. Please use 'cancel', 'reactivate', or 'update'."}, 
-                status=status.HTTP_400_BAD_REQUEST
-            )
+            return Response({"error": "Invalid action. Please use 'cancel', 'reactivate', or 'update'."}, status=status.HTTP_400_BAD_REQUEST)
+
+# class AdminCancelClassView(APIView):
+#     permission_classes = [IsAdminUser]
+
+#     @swagger_auto_schema(
+#         tags=['2. Manual Operations'],
+#         request_body=openapi.Schema(
+#             type=openapi.TYPE_OBJECT,
+#             properties={
+#                 'action': openapi.Schema(
+#                     type=openapi.TYPE_STRING, 
+#                     description="Action type: 'cancel', 'reactivate', or 'update'"
+#                 ),
+#                 'cancel_message': openapi.Schema(
+#                     type=openapi.TYPE_STRING, 
+#                     description="Required for 'cancel' and 'update' actions."
+#                 ),
+#             },
+#             required=['action']
+#         ),
+#         operation_description="**[ADMIN ONLY]** Temporarily cancel any class, reactivate an off class, or update the cancel message for any routine entry."
+#     )
+#     def post(self, request, entry_id):
+#         try:
+#             # admin can access any routine entry, so no teacher filter is applied
+#             entry = RoutineEntry.objects.get(id=entry_id)
+#         except RoutineEntry.DoesNotExist:
+#             return Response(
+#                 {"error": "Routine entry not found."}, 
+#                 status=status.HTTP_404_NOT_FOUND
+#             )
+
+#         action = request.data.get('action')
+
+#         # ১. Class Cancel Logic
+#         if action == 'cancel':
+#             # if admin does not provide a custom message, use a default cancellation message
+#             cancel_message = request.data.get('cancel_message', 'Class temporarily cancelled by Administration.')
+#             entry.is_cancelled = True
+#             entry.cancel_message = cancel_message
+#             entry.save()
+            
+#             # ==========================================================
+#             # ACTIVITY LOG (Admin Cancel)
+#             # ==========================================================
+#             ActivityLog.objects.create(
+#                 actor=request.user,
+#                 action_description=f"ADMIN CANCELLED class: {entry.course.course_code} ({entry.course.course_name}) on {entry.day.name}.", 
+#                 severity='WARNING'
+#             )
+#             return Response({
+#                 "status": "success",
+#                 "message": "Class cancelled successfully by Admin.", 
+#                 "cancel_message": cancel_message
+#             })
+        
+#         # ২. Class Reactivate Logic 
+#         elif action == 'reactivate':
+#             entry.is_cancelled = False
+#             entry.cancel_message = None  
+#             entry.save()
+            
+#             # ==========================================================
+#             # ACTIVITY LOG (Admin Reactivate)
+#             # ==========================================================
+#             ActivityLog.objects.create(
+#                 actor=request.user, 
+#                 action_description=f"ADMIN REACTIVATED class: {entry.course.course_code} ({entry.course.course_name}) on {entry.day.name}.", 
+#                 severity='SUCCESS'
+#             )
+#             return Response({
+#                 "status": "success",
+#                 "message": "Class reactivated successfully by Admin."
+#             })
+
+#         # ৩. Cancel Message Update Logic
+#         elif action == 'update':
+#             if not entry.is_cancelled:
+#                 return Response(
+#                     {"error": "Cannot update message. The class is not cancelled yet."}, 
+#                     status=status.HTTP_400_BAD_REQUEST
+#                 )
+            
+#             new_cancel_message = request.data.get('cancel_message', '')
+#             if not new_cancel_message:
+#                 return Response(
+#                     {"error": "Cancel message cannot be empty for update action."}, 
+#                     status=status.HTTP_400_BAD_REQUEST
+#                 )
+                
+#             entry.cancel_message = new_cancel_message
+#             entry.save()
+            
+#             # ==========================================================
+#             # ACTIVITY LOG (Admin Update Message)
+#             # ==========================================================
+#             ActivityLog.objects.create(
+#                 actor=request.user, 
+#                 action_description=f"ADMIN UPDATED cancellation message for: {entry.course.course_code}.", 
+#                 severity='INFO'
+#             )
+#             return Response({
+#                 "status": "success",
+#                 "message": "Cancellation message updated successfully by Admin.", 
+#                 "cancel_message": new_cancel_message
+#             })
+
+#         # if the action is none of the above, return an error
+#         else:
+#             return Response(
+#                 {"error": "Invalid action. Please use 'cancel', 'reactivate', or 'update'."}, 
+#                 status=status.HTTP_400_BAD_REQUEST
+#             )
+#     permission_classes = [IsAdminUser]  
+
+#     @swagger_auto_schema(
+#         tags=['4. Enterprise Operations'], 
+#         request_body=openapi.Schema(
+#             type=openapi.TYPE_OBJECT,
+#             properties={
+#                 'action': openapi.Schema(
+#                     type=openapi.TYPE_STRING, 
+#                     description="Action type: 'cancel', 'reactivate', or 'update'"
+#                 ),
+#                 'cancel_message': openapi.Schema(
+#                     type=openapi.TYPE_STRING, 
+#                     description="Required for 'cancel' and 'update' actions."
+#                 ),
+#             },
+#             required=['action']
+#         ),
+#         operation_description="**[ADMIN ONLY]** Temporarily cancel ANY class, reactivate an off class, or update the cancel message."
+#     )
+#     def post(self, request, entry_id):
+#         try:
+#             # Admin can access any routine entry, so no teacher filter is applied
+#             entry = RoutineEntry.objects.get(id=entry_id)
+#         except RoutineEntry.DoesNotExist:
+#             return Response(
+#                 {"error": "Routine entry not found."}, 
+#                 status=status.HTTP_404_NOT_FOUND
+#             )
+
+#         action = request.data.get('action')
+
+#         # ১. class cancel logic (Admin)
+#         if action == 'cancel':
+#             # if no custom message is provided, use a default admin cancellation message
+#             cancel_message = request.data.get('cancel_message', 'Class temporarily cancelled by Administration.')
+#             entry.is_cancelled = True
+#             entry.cancel_message = cancel_message
+#             entry.save()
+            
+#             ActivityLog.objects.create(
+#                 actor=request.user,
+#                 action_description=f"ADMIN CANCELLED class: {entry.course.course_name} on {entry.day.name}.", 
+#                 severity='WARNING'
+#             )
+#             return Response({
+#                 "status": "success",
+#                 "message": "Class cancelled successfully by Admin.", 
+#                 "cancel_message": cancel_message
+#             })
+
+#         # ২. again class re-activate (Admin)
+#         elif action == 'reactivate':
+#             entry.is_cancelled = False
+#             entry.cancel_message = None
+#             entry.save()
+            
+#             ActivityLog.objects.create(
+#                 actor=request.user, 
+#                 action_description=f"ADMIN REACTIVATED class: {entry.course.course_name} on {entry.day.name}.", 
+#                 severity='SUCCESS'
+#             )
+#             return Response({
+#                 "status": "success",
+#                 "message": "Class reactivated successfully by Admin."
+#             })
+
+#         # ৩. off class message update logic (Admin)
+#         elif action == 'update':
+#             if not entry.is_cancelled:
+#                 return Response(
+#                     {"error": "Cannot update message. The class is not cancelled yet."}, 
+#                     status=status.HTTP_400_BAD_REQUEST
+#                 )
+            
+#             new_cancel_message = request.data.get('cancel_message', '')
+#             if not new_cancel_message:
+#                 return Response(
+#                     {"error": "Cancel message cannot be empty for update action."}, 
+#                     status=status.HTTP_400_BAD_REQUEST
+#                 )
+                
+#             entry.cancel_message = new_cancel_message
+#             entry.save()
+            
+#             ActivityLog.objects.create(
+#                 actor=request.user, 
+#                 action_description=f"ADMIN UPDATED cancellation message for: {entry.course.course_name}.", 
+#                 severity='INFO'
+#             )
+#             return Response({
+#                 "status": "success",
+#                 "message": "Cancellation message updated successfully by Admin.", 
+#                 "cancel_message": new_cancel_message
+#             })
+
+#         # if the action is none of the above
+#         else:
+#             return Response(
+#                 {"error": "Invalid action. Please use 'cancel', 'reactivate', or 'update'."}, 
+#                 status=status.HTTP_400_BAD_REQUEST
+#             )
+        
+
+
+
+# class TeacherCancelClassView(APIView):
+#     permission_classes = [IsAuthenticated]
+
+#     @swagger_auto_schema(
+#         tags=['3. Teacher Panel'],
+#         request_body=openapi.Schema(
+#             type=openapi.TYPE_OBJECT,
+#             properties={
+#                 'action': openapi.Schema(
+#                     type=openapi.TYPE_STRING, 
+#                     description="Action type: 'cancel', 'reactivate', or 'update'"
+#                 ),
+#                 'cancel_message': openapi.Schema(
+#                     type=openapi.TYPE_STRING, 
+#                     description="Required for 'cancel' and 'update' actions."
+#                 ),
+#             },
+#             required=['action']
+#         ),
+#         operation_description="Cancel a class, reactivate an off class, or update the cancel message."
+#     )
+#     def post(self, request, entry_id):
+#         try:
+#             # Check if the entry exists and belongs to the logged-in teacher
+#             entry = RoutineEntry.objects.get(id=entry_id, course__teacher=request.user)
+#         except RoutineEntry.DoesNotExist:
+#             return Response(
+#                 {"error": "Routine entry not found or you don't have permission to modify this class."}, 
+#                 status=status.HTTP_404_NOT_FOUND
+#             )
+
+#         action = request.data.get('action')
+
+#         # ১. class cancel logic
+#         if action == 'cancel':
+#             cancel_message = request.data.get('cancel_message', 'Class cancelled by teacher.')
+#             entry.is_cancelled = True
+#             entry.cancel_message = cancel_message
+#             entry.save()
+#             ActivityLog.objects.create(actor=request.user,action_description=f"CANCELLED class: {entry.course.course_name} on {entry.day.name}.", severity='WARNING')
+#             return Response({
+#                 "status": "success",
+#                 "message": "Class cancelled successfully.", 
+#                 "cancel_message": cancel_message
+#             })
+        
+
+#         # ২. again class re-activate
+#         elif action == 'reactivate':
+#             entry.is_cancelled = False
+#             entry.cancel_message = None  # Remove the cancellation message when reactivating
+#             entry.save()
+#             ActivityLog.objects.create(actor=request.user, action_description=f"REACTIVATED class: {entry.course.course_name} on {entry.day.name}.", severity='SUCCESS')
+#             return Response({
+#                 "status": "success",
+#                 "message": "Class reactivated successfully. The cancellation message has been removed."
+#             })
+
+#         # ৩. off class massage update logic
+#         elif action == 'update':
+#             if not entry.is_cancelled:
+#                 return Response(
+#                     {"error": "Cannot update message. The class is not cancelled yet."}, 
+#                     status=status.HTTP_400_BAD_REQUEST
+#                 )
+            
+#             new_cancel_message = request.data.get('cancel_message', '')
+#             if not new_cancel_message:
+#                 return Response(
+#                     {"error": "Cancel message cannot be empty for update action."}, 
+#                     status=status.HTTP_400_BAD_REQUEST
+#                 )
+                
+#             entry.cancel_message = new_cancel_message
+#             entry.save()
+#             ActivityLog.objects.create(actor=request.user, action_description=f"UPDATED cancellation message for: {entry.course.course_name}.", severity='INFO')
+#             return Response({
+#                 "status": "success",
+#                 "message": "Cancellation message updated successfully.", 
+#                 "cancel_message": new_cancel_message
+#             })
+
+#         # if the action is none of the above, return an error
+#         else:
+#             return Response(
+#                 {"error": "Invalid action. Please use 'cancel', 'reactivate', or 'update'."}, 
+#                 status=status.HTTP_400_BAD_REQUEST
+#             )
 
 
 
@@ -757,14 +1390,6 @@ class RoutineSwapView(APIView):
 # DYNAMIC EXCEL IMPORT & EXPORT APIs (Master API)
 # ==============================================================================
 
-RESOURCE_MAP = {
-    'user': UserResource,
-    'course': CourseResource,
-    'room': RoomResource,
-    'department': DepartmentResource,
-    'batch': BatchResource,
-    'routine': RoutineEntryResource,
-}
 
 
 
@@ -1005,17 +1630,150 @@ class SystemSnapshotView(APIView):
 # ==============================================================================
 # 6. SYSTEM NOTIFICATIONS API
 # ==============================================================================
+
+# academic/views.py
+
+from drf_yasg.utils import swagger_auto_schema
+from rest_framework.views import APIView
+from rest_framework.response import Response
+from rest_framework import status
+from rest_framework.permissions import IsAuthenticated
+# নিশ্চিত করুন যে Notice, NoticeSerializer, Notification এবং User আপনার ফাইলে ইমপোর্ট করা আছে
+
+class NoticeListCreateView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    @swagger_auto_schema(
+        tags=['Notices'],
+        operation_description="Get a list of all notices.",
+        responses={200: "Success"}
+    )
+    def get(self, request):
+        notices = Notice.objects.all()
+        serializer = NoticeSerializer(notices, many=True)
+        return Response(serializer.data)
+
+    @swagger_auto_schema(
+        tags=['Notices'],
+        operation_description="**[ADMIN & TEACHER ONLY]** Create a new notice and auto-send notifications to target users.",
+        request_body=NoticeSerializer,  # এই লাইনের কারণেই সোয়াগারে ইনপুট বক্সগুলো আসবে
+        responses={201: "Success", 400: "Bad Request", 403: "Forbidden"}
+    )
+    def post(self, request):
+        if request.user.role not in ['ADMIN', 'TEACHER']: 
+            return Response({"error": "You do not have permission to create notices."}, status=status.HTTP_403_FORBIDDEN)
+
+        serializer = NoticeSerializer(data=request.data)
+        if serializer.is_valid():
+            notice = serializer.save(sender=request.user)
+            
+            # Auto-generate Notifications
+            target_users = self.get_users_for_notice(notice)
+            
+            notifications_to_create = []
+            for user in target_users:
+                if user.id != request.user.id:
+                    notifications_to_create.append(
+                        Notification(
+                            recipient=user,
+                            sender=request.user,
+                            related_notice=notice, 
+                            notification_type='NOTICE',
+                            title=notice.title,
+                            message=notice.message,
+                            action_url="/notices" # ফ্রন্টএন্ডের নোটিশ পেজের লিংক
+                        )
+                    )
+            
+            if notifications_to_create:
+                Notification.objects.bulk_create(notifications_to_create)
+
+            return Response({"status": "success", "message": "Notice created and notifications sent.", "data": serializer.data}, status=status.HTTP_201_CREATED)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    def get_users_for_notice(self, notice):
+        if notice.notice_type == 'GLOBAL':
+            return User.objects.filter(is_active=True)
+        
+        dept_ids = notice.target_departments.values_list('id', flat=True)
+        batch_ids = notice.target_batches.values_list('id', flat=True) 
+        
+        users = User.objects.filter(is_active=True)
+        
+        if dept_ids:
+            users = users.filter(department_id__in=dept_ids)
+        if batch_ids:
+            users = users.filter(batch_id__in=batch_ids) 
+            
+        return users.distinct()
+
+class NoticeDetailView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get_object(self, pk):
+        try:
+            return Notice.objects.get(pk=pk)
+        except Notice.DoesNotExist:
+            return None
+
+    def get(self, request, pk):
+        notice = self.get_object(pk)
+        if not notice:
+            return Response({"error": "Notice not found."}, status=status.HTTP_404_NOT_FOUND)
+        serializer = NoticeSerializer(notice)
+        return Response(serializer.data)
+
+    def put(self, request, pk):
+        notice = self.get_object(pk)
+        if not notice:
+            return Response({"error": "Notice not found."}, status=status.HTTP_404_NOT_FOUND)
+
+     
+        if request.user.role != 'ADMIN' and notice.sender != request.user:
+            return Response({"error": "You do not have permission to update this notice."}, status=status.HTTP_403_FORBIDDEN)
+
+        serializer = NoticeSerializer(notice, data=request.data, partial=True)
+        if serializer.is_valid():
+            updated_notice = serializer.save()
+            
+          
+            Notification.objects.filter(related_notice=updated_notice).update(
+                title=updated_notice.title,
+                message=updated_notice.message
+            )
+            return Response({"status": "success", "message": "Notice updated successfully.", "data": serializer.data})
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    def delete(self, request, pk):
+        notice = self.get_object(pk)
+        if not notice:
+            return Response({"error": "Notice not found."}, status=status.HTTP_404_NOT_FOUND)
+
+       
+        if request.user.role != 'ADMIN' and notice.sender != request.user:
+            return Response({"error": "You do not have permission to delete this notice."}, status=status.HTTP_403_FORBIDDEN)
+
+        
+        notice.delete() 
+        return Response({"status": "success", "message": "Notice and all related notifications deleted successfully."})
+
+
+# academic/views.py
+
 class NotificationListView(APIView):
     permission_classes = [IsAuthenticated]
 
     @swagger_auto_schema(
         tags=['5. Notifications'],
-        operation_description="**[ALL USERS]** Get all notifications for the logged-in user (Teachers/Students/Admins)."
+        operation_description="**[ALL USERS]** Get all notifications, including system notices."
     )
     def get(self, request):
-        notifications = Notification.objects.filter(recipient=request.user)
+        notifications = Notification.objects.filter(recipient=request.user).select_related('related_notice')
         serializer = NotificationSerializer(notifications, many=True)
         return Response(serializer.data)
+
+
+
 
 class UnreadNotificationCountView(APIView):
     permission_classes = [IsAuthenticated]
@@ -1044,6 +1802,70 @@ class MarkNotificationReadView(APIView):
         except Notification.DoesNotExist:
             return Response({"error": "Notification not found."}, status=status.HTTP_404_NOT_FOUND)
         
+
+
+# class NoticeListCreateView(APIView):
+#     permission_classes = [IsAuthenticated]
+
+#     def get(self, request):
+#         notices = Notice.objects.all()
+#         serializer = NoticeSerializer(notices, many=True)
+#         return Response(serializer.data)
+
+#     def post(self, request):
+       
+#         if request.user.role not in ['ADMIN', 'TEACHER']: 
+#             return Response({"error": "You do not have permission to create notices."}, status=status.HTTP_403_FORBIDDEN)
+
+#         serializer = NoticeSerializer(data=request.data)
+#         if serializer.is_valid():
+#             notice = serializer.save(sender=request.user)
+            
+#             # Auto-generate Notifications
+#             target_users = self.get_users_for_notice(notice)
+            
+#             notifications_to_create = []
+#             for user in target_users:
+#                 if user.id != request.user.id:
+#                     notifications_to_create.append(
+#                         Notification(
+#                             recipient=user,
+#                             sender=request.user,
+#                             related_notice=notice, 
+#                             notification_type='NOTICE',
+#                             title=notice.title,
+#                             message=notice.message,
+#                             action_url="/notices"
+#                         )
+#                     )
+            
+#             if notifications_to_create:
+#                 Notification.objects.bulk_create(notifications_to_create)
+
+#             return Response({"status": "success", "message": "Notice created and notifications sent.", "data": serializer.data}, status=status.HTTP_201_CREATED)
+#         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+#     def get_users_for_notice(self, notice):
+#         if notice.notice_type == 'GLOBAL':
+#             return User.objects.filter(is_active=True)
+        
+      
+#         dept_ids = notice.target_departments.values_list('id', flat=True)
+#         sem_ids = notice.target_semesters.values_list('id', flat=True)
+#         batch_ids = notice.target_batches.values_list('id', flat=True) 
+        
+#         users = User.objects.filter(is_active=True)
+        
+#         if dept_ids:
+#             users = users.filter(department__id__in=dept_ids)
+#         if sem_ids:
+#             users = users.filter(semester__id__in=sem_ids)
+#         if batch_ids:
+#             users = users.filter(batch__id__in=batch_ids) 
+            
+#         return users.distinct()
+
+
 
 
 
@@ -1110,7 +1932,7 @@ class SystemSettingView(APIView):
         responses={200: "Success"}
     )
     def get(self, request):
-        # আইডি ১ দিয়ে সবসময় একটি সেটিংই থাকবে
+
         setting, created = SystemSetting.objects.get_or_create(id=1)
         return Response({
             "is_routine_locked": setting.is_routine_locked,
@@ -1165,268 +1987,68 @@ class SystemSettingView(APIView):
 
 
 
-from rest_framework.views import APIView
-from rest_framework.response import Response
-from rest_framework import status
-from rest_framework.permissions import IsAuthenticated
-from django.db.models import Q
-from drf_yasg.utils import swagger_auto_schema
 
 
 
+# class NoticeListCreateView(APIView):
+#     permission_classes = [IsAuthenticated]
 
-class DepartmentRoutineView(APIView):
-    permission_classes = [IsAuthenticated]
+#     def get(self, request):
+#         notices = Notice.objects.all()
+#         serializer = NoticeSerializer(notices, many=True)
+#         return Response(serializer.data)
 
-    @swagger_auto_schema(
-        tags=['3. Teacher Dashboard'],
-        operation_description="**[TEACHER ONLY]** Get the complete routine for the teacher's department (includes targeted courses, offered courses, and cross-department classes by colleagues).",
-        responses={200: "Success"}
-    )
-    def get(self, request):
-        user = request.user
+#     def post(self, request):
+       
+#         if request.user.role not in ['ADMIN', 'TEACHER']: 
+#             return Response({"error": "You do not have permission to create notices."}, status=status.HTTP_403_FORBIDDEN)
 
+#         serializer = NoticeSerializer(data=request.data)
+#         if serializer.is_valid():
+#             notice = serializer.save(sender=request.user)
+            
+#             # Auto-generate Notifications
+#             target_users = self.get_users_for_notice(notice)
+            
+#             notifications_to_create = []
+#             for user in target_users:
+#                 if user.id != request.user.id:
+#                     notifications_to_create.append(
+#                         Notification(
+#                             recipient=user,
+#                             sender=request.user,
+#                             related_notice=notice, 
+#                             notification_type='NOTICE',
+#                             title=notice.title,
+#                             message=notice.message,
+#                             action_url="/notices"
+#                         )
+#                     )
+            
+#             if notifications_to_create:
+#                 Notification.objects.bulk_create(notifications_to_create)
 
-        if user.role != 'TEACHER':
-            return Response({"error": "Shudhumatro Teacher ra ei API access korte parben."}, status=status.HTTP_403_FORBIDDEN)
+#             return Response({"status": "success", "message": "Notice created and notifications sent.", "data": serializer.data}, status=status.HTTP_201_CREATED)
+#         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+#     def get_users_for_notice(self, notice):
+#         if notice.notice_type == 'GLOBAL':
+#             return User.objects.filter(is_active=True)
         
-        if not user.department:
-            return Response({"error": "Apnar profile e kono department assign kora nei."}, status=status.HTTP_400_BAD_REQUEST)
-
-        teacher_dept = user.department
-
-        routines = RoutineEntry.objects.filter(
-            Q(course__department=teacher_dept) |                 
-            Q(course__offering_department=teacher_dept) |         
-            Q(course__teacher__department=teacher_dept)          
-        ).select_related('day', 'time_slot', 'course', 'room').distinct()
-
+      
+#         dept_ids = notice.target_departments.values_list('id', flat=True)
+#         sem_ids = notice.target_semesters.values_list('id', flat=True)
+#         batch_ids = notice.target_batches.values_list('id', flat=True) 
         
-        serializer = RoutineEntrySerializer(routines, many=True)
-
-        return Response({
-            "status": "success",
-            "department": teacher_dept.name,
-            "total_classes": routines.count(),
-            "data": serializer.data
-        }, status=status.HTTP_200_OK)
-    
-
-
-
-
-
-class AdminCancelClassView(APIView):
-    permission_classes = [IsAdminUser]
-
-    @swagger_auto_schema(
-        tags=['2. Manual Operations'],
-        request_body=openapi.Schema(
-            type=openapi.TYPE_OBJECT,
-            properties={
-                'action': openapi.Schema(
-                    type=openapi.TYPE_STRING, 
-                    description="Action type: 'cancel', 'reactivate', or 'update'"
-                ),
-                'cancel_message': openapi.Schema(
-                    type=openapi.TYPE_STRING, 
-                    description="Required for 'cancel' and 'update' actions."
-                ),
-            },
-            required=['action']
-        ),
-        operation_description="**[ADMIN ONLY]** Temporarily cancel any class, reactivate an off class, or update the cancel message for any routine entry."
-    )
-    def post(self, request, entry_id):
-        try:
-            # admin can access any routine entry, so no teacher filter is applied
-            entry = RoutineEntry.objects.get(id=entry_id)
-        except RoutineEntry.DoesNotExist:
-            return Response(
-                {"error": "Routine entry not found."}, 
-                status=status.HTTP_404_NOT_FOUND
-            )
-
-        action = request.data.get('action')
-
-        # ১. Class Cancel Logic
-        if action == 'cancel':
-            # if admin does not provide a custom message, use a default cancellation message
-            cancel_message = request.data.get('cancel_message', 'Class temporarily cancelled by Administration.')
-            entry.is_cancelled = True
-            entry.cancel_message = cancel_message
-            entry.save()
-            
-            # ==========================================================
-            # ACTIVITY LOG (Admin Cancel)
-            # ==========================================================
-            ActivityLog.objects.create(
-                actor=request.user,
-                action_description=f"ADMIN CANCELLED class: {entry.course.course_code} ({entry.course.course_name}) on {entry.day.name}.", 
-                severity='WARNING'
-            )
-            return Response({
-                "status": "success",
-                "message": "Class cancelled successfully by Admin.", 
-                "cancel_message": cancel_message
-            })
+#         users = User.objects.filter(is_active=True)
         
-        # ২. Class Reactivate Logic 
-        elif action == 'reactivate':
-            entry.is_cancelled = False
-            entry.cancel_message = None  
-            entry.save()
+#         if dept_ids:
+#             users = users.filter(department__id__in=dept_ids)
+#         if sem_ids:
+#             users = users.filter(semester__id__in=sem_ids)
+#         if batch_ids:
+#             users = users.filter(batch__id__in=batch_ids) 
             
-            # ==========================================================
-            # ACTIVITY LOG (Admin Reactivate)
-            # ==========================================================
-            ActivityLog.objects.create(
-                actor=request.user, 
-                action_description=f"ADMIN REACTIVATED class: {entry.course.course_code} ({entry.course.course_name}) on {entry.day.name}.", 
-                severity='SUCCESS'
-            )
-            return Response({
-                "status": "success",
-                "message": "Class reactivated successfully by Admin."
-            })
+#         return users.distinct()
 
-        # ৩. Cancel Message Update Logic
-        elif action == 'update':
-            if not entry.is_cancelled:
-                return Response(
-                    {"error": "Cannot update message. The class is not cancelled yet."}, 
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-            
-            new_cancel_message = request.data.get('cancel_message', '')
-            if not new_cancel_message:
-                return Response(
-                    {"error": "Cancel message cannot be empty for update action."}, 
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-                
-            entry.cancel_message = new_cancel_message
-            entry.save()
-            
-            # ==========================================================
-            # ACTIVITY LOG (Admin Update Message)
-            # ==========================================================
-            ActivityLog.objects.create(
-                actor=request.user, 
-                action_description=f"ADMIN UPDATED cancellation message for: {entry.course.course_code}.", 
-                severity='INFO'
-            )
-            return Response({
-                "status": "success",
-                "message": "Cancellation message updated successfully by Admin.", 
-                "cancel_message": new_cancel_message
-            })
 
-        # if the action is none of the above, return an error
-        else:
-            return Response(
-                {"error": "Invalid action. Please use 'cancel', 'reactivate', or 'update'."}, 
-                status=status.HTTP_400_BAD_REQUEST
-            )
-    permission_classes = [IsAdminUser]  
-
-    @swagger_auto_schema(
-        tags=['4. Enterprise Operations'], 
-        request_body=openapi.Schema(
-            type=openapi.TYPE_OBJECT,
-            properties={
-                'action': openapi.Schema(
-                    type=openapi.TYPE_STRING, 
-                    description="Action type: 'cancel', 'reactivate', or 'update'"
-                ),
-                'cancel_message': openapi.Schema(
-                    type=openapi.TYPE_STRING, 
-                    description="Required for 'cancel' and 'update' actions."
-                ),
-            },
-            required=['action']
-        ),
-        operation_description="**[ADMIN ONLY]** Temporarily cancel ANY class, reactivate an off class, or update the cancel message."
-    )
-    def post(self, request, entry_id):
-        try:
-            # Admin can access any routine entry, so no teacher filter is applied
-            entry = RoutineEntry.objects.get(id=entry_id)
-        except RoutineEntry.DoesNotExist:
-            return Response(
-                {"error": "Routine entry not found."}, 
-                status=status.HTTP_404_NOT_FOUND
-            )
-
-        action = request.data.get('action')
-
-        # ১. class cancel logic (Admin)
-        if action == 'cancel':
-            # if no custom message is provided, use a default admin cancellation message
-            cancel_message = request.data.get('cancel_message', 'Class temporarily cancelled by Administration.')
-            entry.is_cancelled = True
-            entry.cancel_message = cancel_message
-            entry.save()
-            
-            ActivityLog.objects.create(
-                actor=request.user,
-                action_description=f"ADMIN CANCELLED class: {entry.course.course_name} on {entry.day.name}.", 
-                severity='WARNING'
-            )
-            return Response({
-                "status": "success",
-                "message": "Class cancelled successfully by Admin.", 
-                "cancel_message": cancel_message
-            })
-
-        # ২. again class re-activate (Admin)
-        elif action == 'reactivate':
-            entry.is_cancelled = False
-            entry.cancel_message = None
-            entry.save()
-            
-            ActivityLog.objects.create(
-                actor=request.user, 
-                action_description=f"ADMIN REACTIVATED class: {entry.course.course_name} on {entry.day.name}.", 
-                severity='SUCCESS'
-            )
-            return Response({
-                "status": "success",
-                "message": "Class reactivated successfully by Admin."
-            })
-
-        # ৩. off class message update logic (Admin)
-        elif action == 'update':
-            if not entry.is_cancelled:
-                return Response(
-                    {"error": "Cannot update message. The class is not cancelled yet."}, 
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-            
-            new_cancel_message = request.data.get('cancel_message', '')
-            if not new_cancel_message:
-                return Response(
-                    {"error": "Cancel message cannot be empty for update action."}, 
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-                
-            entry.cancel_message = new_cancel_message
-            entry.save()
-            
-            ActivityLog.objects.create(
-                actor=request.user, 
-                action_description=f"ADMIN UPDATED cancellation message for: {entry.course.course_name}.", 
-                severity='INFO'
-            )
-            return Response({
-                "status": "success",
-                "message": "Cancellation message updated successfully by Admin.", 
-                "cancel_message": new_cancel_message
-            })
-
-        # if the action is none of the above
-        else:
-            return Response(
-                {"error": "Invalid action. Please use 'cancel', 'reactivate', or 'update'."}, 
-                status=status.HTTP_400_BAD_REQUEST
-            )

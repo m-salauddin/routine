@@ -2,7 +2,7 @@
 from rest_framework import serializers
 
 # Importing all models including the new dynamic ones and Notification
-from .models import ActivityLog, Day, RoomType, RoomSubType, Department, Semester, Course, TimeSlot, RoutineEntry, Room, Notification
+from .models import ActivityLog, Day, RoomType, RoomSubType, Department, Semester, Course, TimeSlot, RoutineEntry, Room, Notification,Notice
 
 from rest_framework import serializers
 from .models import FixedClassSchedule
@@ -163,7 +163,7 @@ class TimeSlotSerializer(serializers.ModelSerializer):
 
 
 from rest_framework import serializers
-# ... আপনার মডেল ইমপোর্টগুলো 
+
 
 class RoutineEntrySerializer(serializers.ModelSerializer):
     day_name = serializers.CharField(source='day.name', read_only=True)
@@ -172,7 +172,7 @@ class RoutineEntrySerializer(serializers.ModelSerializer):
 
     course_type = serializers.SerializerMethodField()
     
-    teacher_id = serializers.SerializerMethodField()  # <-- ১. নতুন ফিল্ড যোগ করা হলো
+    teacher_id = serializers.SerializerMethodField()  
     teacher_name = serializers.SerializerMethodField()
     department_name = serializers.SerializerMethodField()
     semester_name = serializers.SerializerMethodField()
@@ -185,7 +185,7 @@ class RoutineEntrySerializer(serializers.ModelSerializer):
     class Meta:
         model = RoutineEntry
         fields = [
-            'id',             # এটি হলো requester_routine_id বা target_routine_id
+            'id',       
             'day', 
             'day_name',
             'start_time', 
@@ -194,7 +194,7 @@ class RoutineEntrySerializer(serializers.ModelSerializer):
             'course_code', 
             'course_type',    
             'credits',       
-            'teacher_id',     # <-- ২. fields লিস্টে যোগ করা হলো (এটি হলো target_teacher_id)
+            'teacher_id',     
             'teacher_name', 
             'department_name', 
             'semester_name', 
@@ -207,7 +207,7 @@ class RoutineEntrySerializer(serializers.ModelSerializer):
     def get_course_type(self, obj):
         return obj.course.course_type.name if obj.course and obj.course.course_type else "N/A"
 
-    # <-- ৩. টিচারের আইডি বের করার লজিক (Error Free)
+  
     def get_teacher_id(self, obj):
         return obj.course.teacher.id if obj.course and obj.course.teacher else None
 
@@ -221,9 +221,12 @@ class RoutineEntrySerializer(serializers.ModelSerializer):
         return obj.course.semester.name if obj.course and obj.course.semester else "N/A"
 
 
+
 # ==============================================================================
 # 5. NOTIFICATION SERIALIZER
 # ==============================================================================
+
+# academic/serializers.py
 class NotificationSerializer(serializers.ModelSerializer):
     sender_name = serializers.CharField(source='sender.username', read_only=True, default="System")
     created_at_formatted = serializers.DateTimeField(source='created_at', format="%Y-%m-%d %I:%M %p", read_only=True)
@@ -233,9 +236,40 @@ class NotificationSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'recipient', 'sender', 'sender_name', 
             'notification_type', 'title', 'message', 
-            'action_url', 'is_read', 'created_at', 'created_at_formatted'
+            'action_url', 'is_read', 'related_notice',
+            'created_at', 'created_at_formatted'
         ]
 
+
+
+
+class NoticeSerializer(serializers.ModelSerializer):
+    sender_name = serializers.CharField(source='sender.username', read_only=True)
+    created_at_formatted = serializers.DateTimeField(source='created_at', format="%Y-%m-%d %I:%M %p", read_only=True)
+    
+    class Meta:
+        model = Notice
+        fields = [
+            'id', 'sender', 'sender_name', 'notice_type', 
+            'title', 'message', 'target_departments', 
+            'target_batches', # Semester রিমুভ করা হয়েছে
+            'created_at_formatted'
+        ]
+        read_only_fields = ['sender']
+
+# class NoticeSerializer(serializers.ModelSerializer):
+#     sender_name = serializers.CharField(source='sender.username', read_only=True)
+#     created_at_formatted = serializers.DateTimeField(source='created_at', format="%Y-%m-%d %I:%M %p", read_only=True)
+    
+#     class Meta:
+#         model = Notice
+#         fields = [
+#             'id', 'sender', 'sender_name', 'notice_type', 
+#             'title', 'message', 'target_departments', 
+#             'target_semesters', 'target_batches', 
+#             'created_at_formatted'
+#         ]
+#         read_only_fields = ['sender']
 
 
 # ==============================================================================

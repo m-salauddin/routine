@@ -63,6 +63,7 @@ class Semester(TimeStampedModel):
     def __str__(self): return self.name
 
 # --- NEW: BATCH MODEL FOR ALUMNI & LIFECYCLE MANAGEMENT ---
+
 class Batch(TimeStampedModel):
     STATUS_CHOICES = (
         ('ACTIVE', 'Active (Currently Studying)'),
@@ -124,6 +125,7 @@ class Room(TimeStampedModel):
 # ==============================================================================
 # 3. ACADEMIC & COURSE MODELS (Cross-Department Architecture)
 # ==============================================================================
+
 class Course(TimeStampedModel):
     course_name = models.CharField(max_length=255)
     course_code = models.CharField(max_length=50, unique=True)
@@ -171,6 +173,7 @@ class Course(TimeStampedModel):
 # ==============================================================================
 # 4. ROUTINE & CONSTRAINT MODELS
 # ==============================================================================
+
 class RoutineEntry(TimeStampedModel):
     day = models.ForeignKey(Day, on_delete=models.CASCADE)
     time_slot = models.ForeignKey(TimeSlot, on_delete=models.CASCADE)
@@ -277,6 +280,7 @@ class SystemBackup(models.Model):
 # ==============================================================================
 # 5. TEMPORARY SWAP & PROXY MANAGEMENT
 # ==============================================================================
+
 class TemporarySwapRequest(TimeStampedModel):
     SWAP_TYPE_CHOICES = (
         ('PROXY', 'Proxy / Substitution (Teacher B takes Teacher A\'s class)'),
@@ -320,6 +324,31 @@ class TemporarySwapRequest(TimeStampedModel):
 # ==============================================================================
 # 6. SYSTEM NOTIFICATIONS (Event-Driven Alerts)
 # ==============================================================================
+
+
+
+
+class Notice(TimeStampedModel):
+    NOTICE_TYPES = (
+        ('GLOBAL', 'Global Notice (All Users)'),
+        ('TARGETED', 'Targeted Notice (Specific Dept/Batch)'), 
+    )
+    
+    sender = models.ForeignKey(settings.AUTH_USER_MODEL, related_name='sent_notices', on_delete=models.CASCADE)
+    notice_type = models.CharField(max_length=20, choices=NOTICE_TYPES, default='TARGETED')
+    title = models.CharField(max_length=255)
+    message = models.TextField()
+    
+   
+    target_departments = models.ManyToManyField('Department', blank=True, related_name='notices')
+    target_batches = models.ManyToManyField('Batch', blank=True, related_name='notices')
+    
+    class Meta:
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"{self.notice_type} - {self.title} by {self.sender.username}"
+
 class Notification(TimeStampedModel):
     NOTIFICATION_TYPES = (
         ('SWAP_REQ', 'Swap Request Received'),
@@ -327,6 +356,7 @@ class Notification(TimeStampedModel):
         ('SWAP_REJ', 'Swap Request Rejected'),
         ('CLASS_DEL', 'Class Cancelled'),
         ('ADMIN_MSG', 'Admin Message'),
+        ('NOTICE', 'System Notice'),
     )
 
     recipient = models.ForeignKey(settings.AUTH_USER_MODEL, related_name='notifications', on_delete=models.CASCADE)
@@ -334,6 +364,9 @@ class Notification(TimeStampedModel):
         settings.AUTH_USER_MODEL, related_name='sent_notifications', 
         on_delete=models.SET_NULL, null=True, blank=True
     )
+    
+   
+    related_notice = models.ForeignKey(Notice, on_delete=models.CASCADE, null=True, blank=True, related_name='generated_notifications')
     
     notification_type = models.CharField(max_length=20, choices=NOTIFICATION_TYPES)
     title = models.CharField(max_length=255)
@@ -349,8 +382,63 @@ class Notification(TimeStampedModel):
 
     def __str__(self):
         return f"To {self.recipient.username} - {self.title} [Read: {self.is_read}]"
+# #academic/models.py
+# class Notice(TimeStampedModel):
+#     NOTICE_TYPES = (
+#         ('GLOBAL', 'Global Notice (All Users)'),
+#         ('TARGETED', 'Targeted Notice (Specific Dept/Semester/Batch)'),
+#     )
     
+#     sender = models.ForeignKey(settings.AUTH_USER_MODEL, related_name='sent_notices', on_delete=models.CASCADE)
+#     notice_type = models.CharField(max_length=20, choices=NOTICE_TYPES, default='TARGETED')
+#     title = models.CharField(max_length=255)
+#     message = models.TextField()
+    
+#     # Target Audience (M2M fields)
+#     target_departments = models.ManyToManyField('Department', blank=True, related_name='notices')
+#     target_semesters = models.ManyToManyField('Semester', blank=True, related_name='notices')
+#     target_batches = models.ManyToManyField('Batch', blank=True, related_name='notices') # [NEW] ব্যাচ টার্গেট করার জন্য
+    
+#     class Meta:
+#         ordering = ['-created_at']
 
+#     def __str__(self):
+#         return f"{self.notice_type} - {self.title} by {self.sender.username}"
+
+
+# class Notification(TimeStampedModel):
+#     NOTIFICATION_TYPES = (
+#         ('SWAP_REQ', 'Swap Request Received'),
+#         ('SWAP_ACC', 'Swap Request Accepted'),
+#         ('SWAP_REJ', 'Swap Request Rejected'),
+#         ('CLASS_DEL', 'Class Cancelled'),
+#         ('ADMIN_MSG', 'Admin Message'),
+#         ('NOTICE', 'System Notice'), 
+#     )
+
+#     recipient = models.ForeignKey(settings.AUTH_USER_MODEL, related_name='notifications', on_delete=models.CASCADE)
+#     sender = models.ForeignKey(
+#         settings.AUTH_USER_MODEL, related_name='sent_notifications', 
+#         on_delete=models.SET_NULL, null=True, blank=True
+#     )
+    
+    
+#     related_notice = models.ForeignKey(Notice, on_delete=models.CASCADE, null=True, blank=True, related_name='generated_notifications')
+    
+#     notification_type = models.CharField(max_length=20, choices=NOTIFICATION_TYPES)
+#     title = models.CharField(max_length=255)
+#     message = models.TextField()
+#     action_url = models.CharField(
+#         max_length=255, null=True, blank=True, 
+#         help_text="Frontend URL to redirect when user clicks the notification"
+#     )
+#     is_read = models.BooleanField(default=False)
+
+#     class Meta:
+#         ordering = ['-created_at']
+
+#     def __str__(self):
+#         return f"To {self.recipient.username} - {self.title} [Read: {self.is_read}]"
 
 
 # ==============================================================================
