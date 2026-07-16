@@ -313,181 +313,6 @@ class RoomViewSet(viewsets.ModelViewSet):
 #             return Response({"error": "Pending request not found or you are not authorized."}, status=status.HTTP_404_NOT_FOUND)
 
 
-from datetime import datetime
-from rest_framework.views import APIView
-from rest_framework.response import Response
-from rest_framework import status
-from rest_framework.permissions import IsAuthenticated
-
-from drf_yasg import openapi
-
-
-class TeacherSwapRequestView(APIView):
-    permission_classes = [IsAuthenticated]
-
-    @swagger_auto_schema(
-        tags=['3. Teacher Operations'],
-        operation_description="**[TEACHER ONLY]** Request a temporary class swap (PROXY or MUTUAL).",
-        request_body=openapi.Schema(
-            type=openapi.TYPE_OBJECT,
-            required=['swap_type', 'target_teacher_id', 'requester_routine_id', 'swap_date'],
-            properties={
-                'swap_type': openapi.Schema(type=openapi.TYPE_STRING, description="'PROXY' or 'MUTUAL'", default='PROXY'),
-                'target_teacher_id': openapi.Schema(type=openapi.TYPE_INTEGER, description="ID of the teacher you are requesting", default=1),
-                'requester_routine_id': openapi.Schema(type=openapi.TYPE_INTEGER, description="Your routine ID", default=10),
-                'target_routine_id': openapi.Schema(type=openapi.TYPE_INTEGER, description="Target routine ID (Required only for MUTUAL)", default=15),
-                'swap_date': openapi.Schema(type=openapi.TYPE_STRING, format=openapi.FORMAT_DATE, description="Format: YYYY-MM-DD", default="2026-06-25"),
-                'reason': openapi.Schema(type=openapi.TYPE_STRING, description="Reason for the swap", default="Medical Emergency"),
-            }
-        ),
-        responses={200: "Success", 400: "Bad Request (Conflict/Errors)", 403: "Forbidden"}
-    )
-    def post(self, request):
-        user = request.user
-        if getattr(user, 'role', '') != 'TEACHER':
-            return Response({"error": "Only teachers can request swaps."}, status=status.HTTP_403_FORBIDDEN)
-
-        swap_type = request.data.get('swap_type')
-        target_teacher_id = request.data.get('target_teacher_id')
-        requester_routine_id = request.data.get('requester_routine_id')
-        target_routine_id = request.data.get('target_routine_id')
-        swap_date_str = request.data.get('swap_date')
-        reason = request.data.get('reason', '')
-
-        try:
-            swap_date = datetime.strptime(swap_date_str, '%Y-%m-%d').date()
-            req_routine = RoutineEntry.objects.get(id=requester_routine_id, is_active=True)
-            target_teacher = User.objects.get(id=target_teacher_id, role='TEACHER')
-
-            if req_routine.course.teacher != user:
-                return Response({"error": "You can only swap your own classes."}, status=status.HTTP_403_FORBIDDEN)
-
-            # কোর্সের বেসিক ইনফরমেশন যা নোটিফিকেশনে পাঠানো হবে
-            req_course_info = f"{req_routine.course.course_code} on {req_routine.day.name} at {req_routine.time_slot.start_time.strftime('%I:%M %p')}"
-
-            if swap_type == 'PROXY':
-                conflict = RoutineEntry.objects.filter(
-                    day=req_routine.day,
-                    time_slot=req_routine.time_slot,
-                    course__teacher=target_teacher,
-                    is_active=True
-                ).exists()
-                if conflict:
-                    return Response({"error": f"{target_teacher.username} already has a class at this time!"}, status=status.HTTP_400_BAD_REQUEST)
-
-                req = TemporarySwapRequest.objects.create(
-                    swap_type='PROXY', requester=user, target_teacher=target_teacher,
-                    requester_routine=req_routine, swap_date=swap_date, reason=reason
-                )
-
-                # PROXY Notification
-                msg = f"{user.username} requested you to take their class ({req_course_info}) on Date: {swap_date}. Reason: {reason}"
-                title = f"PROXY Swap Request from {user.username}"
-
-            elif swap_type == 'MUTUAL':
-                if not target_routine_id:
-                    return Response({"error": "target_routine_id is required for MUTUAL swap."}, status=status.HTTP_400_BAD_REQUEST)
-
-                tgt_routine = RoutineEntry.objects.get(id=target_routine_id, is_active=True)
-                if tgt_routine.course.teacher != target_teacher:
-                    return Response({"error": "Target routine does not belong to the target teacher."}, status=status.HTTP_400_BAD_REQUEST)
-
-                conflict1 = RoutineEntry.objects.filter(
-                    day=tgt_routine.day, time_slot=tgt_routine.time_slot, course__teacher=user, is_active=True
-                ).exists()
-                conflict2 = RoutineEntry.objects.filter(
-                    day=req_routine.day, time_slot=req_routine.time_slot, course__teacher=target_teacher, is_active=True
-                ).exists()
-
-                if conflict1 or conflict2:
-                    return Response({"error": "Mutual swap causes a timetable conflict for one or both teachers."}, status=status.HTTP_400_BAD_REQUEST)
-
-                req = TemporarySwapRequest.objects.create(
-                    swap_type='MUTUAL', requester=user, target_teacher=target_teacher,
-                    requester_routine=req_routine, target_routine=tgt_routine,
-                    swap_date=swap_date, reason=reason
-                )
-
-                # MUTUAL Notification
-                tgt_course_info = f"{tgt_routine.course.course_code} at {tgt_routine.time_slot.start_time.strftime('%I:%M %p')}"
-                msg = f"{user.username} proposed a MUTUAL swap. Exchange your class ({tgt_course_info}) with their class ({req_course_info}) on Date: {swap_date}. Reason: {reason}"
-                title = f"MUTUAL Swap Request from {user.username}"
-
-            else:
-                return Response({"error": "Invalid swap_type."}, status=status.HTTP_400_BAD_REQUEST)
-
-            # [NEW] টার্গেট টিচারের কাছে ডিটেইলড নোটিফিকেশন পাঠানো হচ্ছে
-            Notification.objects.create(
-                recipient=target_teacher,
-                sender=user,
-                notification_type='SWAP_REQ',
-                title=title,
-                message=msg,
-                action_url=f"/dashboard/swap-requests?request_id={req.id}"
-            )
-
-            return Response({"status": "Success", "message": "Swap request sent successfully!", "request_id": req.id})
-
-        except Exception as e:
-            return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
-    @swagger_auto_schema(
-        tags=['3. Teacher Operations'],
-        operation_description="**[TEACHER ONLY]** Accept or Reject a pending swap request.",
-        request_body=openapi.Schema(
-            type=openapi.TYPE_OBJECT,
-            required=['request_id', 'action'],
-            properties={
-                'request_id': openapi.Schema(type=openapi.TYPE_INTEGER, description="ID of the swap request", default=1),
-                'action': openapi.Schema(type=openapi.TYPE_STRING, description="'ACCEPT' or 'REJECT'", default="ACCEPT"),
-            }
-        ),
-        responses={200: "Success", 400: "Bad Request", 404: "Not Found"}
-    )
-    def put(self, request):
-        user = request.user
-        request_id = request.data.get('request_id')
-        action = request.data.get('action')
-
-        try:
-            swap_req = TemporarySwapRequest.objects.get(id=request_id, target_teacher=user, status='PENDING')
-            course_code = swap_req.requester_routine.course.course_code
-
-            if action == 'ACCEPT':
-                swap_req.status = 'ACCEPTED'
-                swap_req.save()
-
-                # রিকোয়েস্ট অ্যাকসেপ্ট হলে অরিজিনাল টিচারকে নোটিফিকেশন পাঠানো
-                Notification.objects.create(
-                    recipient=swap_req.requester,
-                    sender=user,
-                    notification_type='SWAP_ACC',
-                    title='Swap Request Accepted 🎉',
-                    message=f"{user.username} has ACCEPTED your {swap_req.swap_type} swap request for {course_code} on {swap_req.swap_date}.",
-                    action_url="/dashboard/teachers-routine"
-                )
-                return Response({"status": "Success", "message": "Swap request ACCEPTED."})
-            
-            elif action == 'REJECT':
-                swap_req.status = 'REJECTED'
-                swap_req.save()
-
-                
-                Notification.objects.create(
-                    recipient=swap_req.requester,
-                    sender=user,
-                    notification_type='SWAP_REJ',
-                    title='Swap Request Rejected ❌',
-                    message=f"{user.username} has REJECTED your {swap_req.swap_type} swap request for {course_code} on {swap_req.swap_date}.",
-                    action_url="/dashboard/teachers-routine"
-                )
-                return Response({"status": "Success", "message": "Swap request REJECTED."})
-            
-            else:
-                return Response({"error": "Invalid action."}, status=status.HTTP_400_BAD_REQUEST)
-        except TemporarySwapRequest.DoesNotExist:
-            return Response({"error": "Pending request not found or you are not authorized."}, status=status.HTTP_404_NOT_FOUND)
-
 class GenerateRoutineView(APIView):
     permission_classes = [IsAdminUser]
     
@@ -1984,7 +1809,180 @@ class SystemSettingView(APIView):
     
 
 
+import datetime
+from rest_framework.views import APIView
+from rest_framework.response import Response
+from rest_framework import status
+from rest_framework.permissions import IsAuthenticated
+from drf_yasg.utils import swagger_auto_schema
+from drf_yasg import openapi
 
+class TeacherSwapRequestView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    @swagger_auto_schema(
+        tags=['3. Teacher Operations'],
+        operation_description="**[TEACHER ONLY]** Request a temporary class swap (PROXY or MUTUAL).",
+        request_body=openapi.Schema(
+            type=openapi.TYPE_OBJECT,
+            required=['swap_type', 'target_teacher_id', 'requester_routine_id', 'swap_date'],
+            properties={
+                'swap_type': openapi.Schema(type=openapi.TYPE_STRING, description="'PROXY' or 'MUTUAL'", default='PROXY'),
+                'target_teacher_id': openapi.Schema(type=openapi.TYPE_INTEGER, description="ID of the teacher you are requesting", default=1),
+                'requester_routine_id': openapi.Schema(type=openapi.TYPE_INTEGER, description="Your routine ID", default=10),
+                'target_routine_id': openapi.Schema(type=openapi.TYPE_INTEGER, description="Target routine ID (Required only for MUTUAL)", default=15),
+                'swap_date': openapi.Schema(type=openapi.TYPE_STRING, format=openapi.FORMAT_DATE, description="Format: YYYY-MM-DD", default="2026-06-25"),
+                'reason': openapi.Schema(type=openapi.TYPE_STRING, description="Reason for the swap", default="Medical Emergency"),
+            }
+        ),
+        responses={200: "Success", 400: "Bad Request (Conflict/Errors)", 403: "Forbidden"}
+    )
+    def post(self, request):
+        user = request.user
+        if getattr(user, 'role', '') != 'TEACHER':
+            return Response({"error": "Only teachers can request swaps."}, status=status.HTTP_403_FORBIDDEN)
+
+        swap_type = request.data.get('swap_type')
+        target_teacher_id = request.data.get('target_teacher_id')
+        requester_routine_id = request.data.get('requester_routine_id')
+        target_routine_id = request.data.get('target_routine_id')
+        swap_date_str = request.data.get('swap_date')
+        reason = request.data.get('reason', '')
+
+        try:
+            # [UPDATED HERE] datetime.datetime.strptime ব্যবহার করা হয়েছে
+            swap_date = datetime.datetime.strptime(swap_date_str, '%Y-%m-%d').date()
+            req_routine = RoutineEntry.objects.get(id=requester_routine_id, is_active=True)
+            target_teacher = User.objects.get(id=target_teacher_id, role='TEACHER')
+
+            if req_routine.course.teacher != user:
+                return Response({"error": "You can only swap your own classes."}, status=status.HTTP_403_FORBIDDEN)
+
+            
+            req_course_info = f"{req_routine.course.course_code} on {req_routine.day.name} at {req_routine.time_slot.start_time.strftime('%I:%M %p')}"
+
+            if swap_type == 'PROXY':
+                conflict = RoutineEntry.objects.filter(
+                    day=req_routine.day,
+                    time_slot=req_routine.time_slot,
+                    course__teacher=target_teacher,
+                    is_active=True
+                ).exists()
+                if conflict:
+                    return Response({"error": f"{target_teacher.username} already has a class at this time!"}, status=status.HTTP_400_BAD_REQUEST)
+
+                req = TemporarySwapRequest.objects.create(
+                    swap_type='PROXY', requester=user, target_teacher=target_teacher,
+                    requester_routine=req_routine, swap_date=swap_date, reason=reason
+                )
+
+                # PROXY Notification
+                msg = f"{user.username} requested you to take their class ({req_course_info}) on Date: {swap_date}. Reason: {reason}"
+                title = f"PROXY Swap Request from {user.username}"
+
+            elif swap_type == 'MUTUAL':
+                if not target_routine_id:
+                    return Response({"error": "target_routine_id is required for MUTUAL swap."}, status=status.HTTP_400_BAD_REQUEST)
+
+                tgt_routine = RoutineEntry.objects.get(id=target_routine_id, is_active=True)
+                if tgt_routine.course.teacher != target_teacher:
+                    return Response({"error": "Target routine does not belong to the target teacher."}, status=status.HTTP_400_BAD_REQUEST)
+
+                conflict1 = RoutineEntry.objects.filter(
+                    day=tgt_routine.day, time_slot=tgt_routine.time_slot, course__teacher=user, is_active=True
+                ).exists()
+                conflict2 = RoutineEntry.objects.filter(
+                    day=req_routine.day, time_slot=req_routine.time_slot, course__teacher=target_teacher, is_active=True
+                ).exists()
+
+                if conflict1 or conflict2:
+                    return Response({"error": "Mutual swap causes a timetable conflict for one or both teachers."}, status=status.HTTP_400_BAD_REQUEST)
+
+                req = TemporarySwapRequest.objects.create(
+                    swap_type='MUTUAL', requester=user, target_teacher=target_teacher,
+                    requester_routine=req_routine, target_routine=tgt_routine,
+                    swap_date=swap_date, reason=reason
+                )
+
+                # MUTUAL Notification
+                tgt_course_info = f"{tgt_routine.course.course_code} at {tgt_routine.time_slot.start_time.strftime('%I:%M %p')}"
+                msg = f"{user.username} proposed a MUTUAL swap. Exchange your class ({tgt_course_info}) with their class ({req_course_info}) on Date: {swap_date}. Reason: {reason}"
+                title = f"MUTUAL Swap Request from {user.username}"
+
+            else:
+                return Response({"error": "Invalid swap_type."}, status=status.HTTP_400_BAD_REQUEST)
+
+            
+            Notification.objects.create(
+                recipient=target_teacher,
+                sender=user,
+                notification_type='SWAP_REQ',
+                title=title,
+                message=msg,
+                action_url=f"/dashboard/swap-requests?request_id={req.id}"
+            )
+
+            return Response({"status": "Success", "message": "Swap request sent successfully!", "request_id": req.id})
+
+        except Exception as e:
+            return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    @swagger_auto_schema(
+        tags=['3. Teacher Operations'],
+        operation_description="**[TEACHER ONLY]** Accept or Reject a pending swap request.",
+        request_body=openapi.Schema(
+            type=openapi.TYPE_OBJECT,
+            required=['request_id', 'action'],
+            properties={
+                'request_id': openapi.Schema(type=openapi.TYPE_INTEGER, description="ID of the swap request", default=1),
+                'action': openapi.Schema(type=openapi.TYPE_STRING, description="'ACCEPT' or 'REJECT'", default="ACCEPT"),
+            }
+        ),
+        responses={200: "Success", 400: "Bad Request", 404: "Not Found"}
+    )
+    def put(self, request):
+        user = request.user
+        request_id = request.data.get('request_id')
+        action = request.data.get('action')
+
+        try:
+            swap_req = TemporarySwapRequest.objects.get(id=request_id, target_teacher=user, status='PENDING')
+            course_code = swap_req.requester_routine.course.course_code
+
+            if action == 'ACCEPT':
+                swap_req.status = 'ACCEPTED'
+                swap_req.save()
+
+                
+                Notification.objects.create(
+                    recipient=swap_req.requester,
+                    sender=user,
+                    notification_type='SWAP_ACC',
+                    title='Swap Request Accepted 🎉',
+                    message=f"{user.username} has ACCEPTED your {swap_req.swap_type} swap request for {course_code} on {swap_req.swap_date}.",
+                    action_url="/dashboard/teachers-routine"
+                )
+                return Response({"status": "Success", "message": "Swap request ACCEPTED."})
+            
+            elif action == 'REJECT':
+                swap_req.status = 'REJECTED'
+                swap_req.save()
+
+                
+                Notification.objects.create(
+                    recipient=swap_req.requester,
+                    sender=user,
+                    notification_type='SWAP_REJ',
+                    title='Swap Request Rejected ❌',
+                    message=f"{user.username} has REJECTED your {swap_req.swap_type} swap request for {course_code} on {swap_req.swap_date}.",
+                    action_url="/dashboard/teachers-routine"
+                )
+                return Response({"status": "Success", "message": "Swap request REJECTED."})
+            
+            else:
+                return Response({"error": "Invalid action."}, status=status.HTTP_400_BAD_REQUEST)
+        except TemporarySwapRequest.DoesNotExist:
+            return Response({"error": "Pending request not found or you are not authorized."}, status=status.HTTP_404_NOT_FOUND)
 
 
 
