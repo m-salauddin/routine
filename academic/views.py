@@ -552,20 +552,30 @@ class RoutineListView(APIView):
 
         return Response(modified_data)
 
+import datetime
+from django.db.models import Q
+from rest_framework.views import APIView
+from rest_framework.response import Response
+from rest_framework import status
+from rest_framework.permissions import IsAuthenticated
+from drf_yasg.utils import swagger_auto_schema
+from drf_yasg import openapi
 
 class DepartmentRoutineView(APIView):
     permission_classes = [IsAuthenticated]
 
     @swagger_auto_schema(
         tags=['3. Teacher Dashboard'],
-        operation_description="**[TEACHER ONLY]** Get the complete routine for the teacher's department (includes targeted courses, offered courses, and cross-department classes by colleagues).",
+        operation_description="**[TEACHER ONLY]** Get the complete routine for the teacher's department. Automatically applies Accepted Temporary Swaps based on reference_date.",
+        manual_parameters=[
+            openapi.Parameter('reference_date', openapi.IN_QUERY, description="Target Date (YYYY-MM-DD). Defaults to today if blank.", type=openapi.TYPE_STRING),
+        ],
         responses={200: "Success"}
     )
     def get(self, request):
         user = request.user
 
-
-        if user.role != 'TEACHER':
+        if getattr(user, 'role', '') != 'TEACHER':
             return Response({"error": "Shudhumatro Teacher ra ei API access korte parben."}, status=status.HTTP_403_FORBIDDEN)
         
         if not user.department:
@@ -573,24 +583,100 @@ class DepartmentRoutineView(APIView):
 
         teacher_dept = user.department
 
+        # বেস রুটিন ফেচ করা (যেগুলো অ্যাক্টিভ)
         routines = RoutineEntry.objects.filter(
+            is_active=True
+        ).filter(
             Q(course__department=teacher_dept) |                 
             Q(course__offering_department=teacher_dept) |         
             Q(course__teacher__department=teacher_dept)          
         ).select_related('day', 'time_slot', 'course', 'room').distinct()
 
+        # ডে এবং টাইমের উপর ভিত্তি করে সর্টিং
+        routines = routines.order_by('day__order', 'time_slot__start_time')
         
         serializer = RoutineEntrySerializer(routines, many=True)
+        data = serializer.data
+
+        # ======================================================================
+        # THE MAGIC OVERLAY: DYNAMIC DATE PROJECTION & SWAP INJECTION
+        # ======================================================================
+        reference_date_str = request.query_params.get('reference_date')
+        if reference_date_str:
+            try:
+                ref_date = datetime.datetime.strptime(reference_date_str, '%Y-%m-%d').date()
+            except ValueError:
+                ref_date = datetime.date.today()
+        else:
+            ref_date = datetime.date.today()
+
+        idx = (ref_date.weekday() + 1) % 7 
+        sunday_date = ref_date - datetime.timedelta(days=idx)
+
+        days_qs = Day.objects.all().order_by('order')
+        day_date_map = {}
+        for i, d in enumerate(days_qs):
+            day_date_map[d.name] = sunday_date + datetime.timedelta(days=i)
+
+        week_start = sunday_date
+        week_end = sunday_date + datetime.timedelta(days=6)
+
+        accepted_swaps = TemporarySwapRequest.objects.filter(
+            status='ACCEPTED',
+            swap_date__range=[week_start, week_end]
+        ).select_related('requester_routine', 'target_routine', 'target_teacher')
+
+        proxy_swaps = {s.requester_routine_id: s for s in accepted_swaps if s.swap_type == 'PROXY'}
+        mutual_swaps = {}
+        for s in accepted_swaps:
+            if s.swap_type == 'MUTUAL':
+                mutual_swaps[s.requester_routine_id] = s
+                if s.target_routine_id:
+                    mutual_swaps[s.target_routine_id] = s
+
+        modified_data = []
+        for item in data:
+            entry_id = item['id']
+            day_name = item['day_name']
+            exact_date = day_date_map.get(day_name)
+
+            item['date'] = exact_date.strftime('%Y-%m-%d') if exact_date else None
+            item['is_temporary_proxy'] = False
+            item['is_temporary_mutual'] = False
+
+            if entry_id in proxy_swaps and proxy_swaps[entry_id].swap_date == exact_date:
+                item['teacher_name'] = proxy_swaps[entry_id].target_teacher.username
+                item['is_temporary_proxy'] = True
+
+            elif entry_id in mutual_swaps and mutual_swaps[entry_id].swap_date == exact_date:
+                swap = mutual_swaps[entry_id]
+                
+                if swap.requester_routine_id == entry_id and swap.target_routine:
+                    t_routine = swap.target_routine
+                    item['day'] = t_routine.day.id
+                    item['day_name'] = t_routine.day.name
+                    item['start_time'] = t_routine.time_slot.start_time.strftime('%H:%M:%S')
+                    item['end_time'] = t_routine.time_slot.end_time.strftime('%H:%M:%S')
+                    item['room_number'] = t_routine.room.room_number if t_routine.room else "N/A"
+                    item['is_temporary_mutual'] = True
+                    
+                elif swap.target_routine_id == entry_id:
+                    r_routine = swap.requester_routine
+                    item['day'] = r_routine.day.id
+                    item['day_name'] = r_routine.day.name
+                    item['start_time'] = r_routine.time_slot.start_time.strftime('%H:%M:%S')
+                    item['end_time'] = r_routine.time_slot.end_time.strftime('%H:%M:%S')
+                    item['room_number'] = r_routine.room.room_number if r_routine.room else "N/A"
+                    item['is_temporary_mutual'] = True
+
+            modified_data.append(item)
 
         return Response({
             "status": "success",
             "department": teacher_dept.name,
-            "total_classes": routines.count(),
-            "data": serializer.data
+            "total_classes": len(modified_data),
+            "data": modified_data
         }, status=status.HTTP_200_OK)
-    
-
-
 
 # ==============================================================================
 # TEACHER PANEL: CANCEL, REACTIVATE & UPDATE CLASS
@@ -1541,6 +1627,11 @@ class NoticeDetailView(APIView):
         except Notice.DoesNotExist:
             return None
 
+    @swagger_auto_schema(
+        tags=['Notices'],
+        operation_description="Get details of a specific notice.",
+        responses={200: "Success", 404: "Not Found"}
+    )
     def get(self, request, pk):
         notice = self.get_object(pk)
         if not notice:
@@ -1548,12 +1639,17 @@ class NoticeDetailView(APIView):
         serializer = NoticeSerializer(notice)
         return Response(serializer.data)
 
+    @swagger_auto_schema(
+        tags=['Notices'],
+        operation_description="**[ADMIN & TEACHER ONLY]** Update a specific notice. Teachers can only update their own notices.",
+        request_body=NoticeSerializer,
+        responses={200: "Success", 400: "Bad Request", 403: "Forbidden", 404: "Not Found"}
+    )
     def put(self, request, pk):
         notice = self.get_object(pk)
         if not notice:
             return Response({"error": "Notice not found."}, status=status.HTTP_404_NOT_FOUND)
 
-     
         if request.user.role != 'ADMIN' and notice.sender != request.user:
             return Response({"error": "You do not have permission to update this notice."}, status=status.HTTP_403_FORBIDDEN)
 
@@ -1561,7 +1657,7 @@ class NoticeDetailView(APIView):
         if serializer.is_valid():
             updated_notice = serializer.save()
             
-          
+            # আপনার লেখা নোটিফিকেশন আপডেটের লজিক 
             Notification.objects.filter(related_notice=updated_notice).update(
                 title=updated_notice.title,
                 message=updated_notice.message
@@ -1569,6 +1665,11 @@ class NoticeDetailView(APIView):
             return Response({"status": "success", "message": "Notice updated successfully.", "data": serializer.data})
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
+    @swagger_auto_schema(
+        tags=['Notices'],
+        operation_description="**[ADMIN & TEACHER ONLY]** Delete a specific notice. Teachers can only delete their own notices.",
+        responses={204: "No Content", 403: "Forbidden", 404: "Not Found"}
+    )
     def delete(self, request, pk):
         notice = self.get_object(pk)
         if not notice:
@@ -1580,10 +1681,7 @@ class NoticeDetailView(APIView):
 
         
         notice.delete() 
-        return Response({"status": "success", "message": "Notice and all related notifications deleted successfully."})
-
-
-# academic/views.py
+        return Response({"status": "success", "message": "Notice and all related notifications deleted successfully."}, status=status.HTTP_204_NO_CONTENT)
 
 class NotificationListView(APIView):
     permission_classes = [IsAuthenticated]
@@ -2050,3 +2148,64 @@ class TeacherSwapRequestView(APIView):
 #         return users.distinct()
 
 
+from rest_framework.views import APIView
+from rest_framework.response import Response
+from rest_framework import status
+from rest_framework.permissions import IsAuthenticated
+from drf_yasg.utils import swagger_auto_schema
+from drf_yasg import openapi
+# from .models import Department # নিশ্চিত করুন Department ইমপোর্ট করা আছে
+
+class UniversityDepartmentListView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    @swagger_auto_schema(
+        tags=['4. General Info'],
+        operation_summary="Get All University Departments",
+        operation_description="""
+        **[TEACHER ONLY]** 
+        
+        This api show all active department 
+        """,
+        responses={
+            200: openapi.Response(
+                description="Success - List of Departments fetched successfully.",
+                schema=openapi.Schema(
+                    type=openapi.TYPE_OBJECT,
+                    properties={
+                        'status': openapi.Schema(type=openapi.TYPE_STRING, example='success'),
+                        'total_departments': openapi.Schema(type=openapi.TYPE_INTEGER, example=12),
+                        'data': openapi.Schema(
+                            type=openapi.TYPE_ARRAY,
+                            items=openapi.Schema(
+                                type=openapi.TYPE_OBJECT,
+                                properties={
+                                    'id': openapi.Schema(type=openapi.TYPE_INTEGER, example=1),
+                                    'name': openapi.Schema(type=openapi.TYPE_STRING, example='Computer Science and Engineering'),
+                                }
+                            )
+                        )
+                    }
+                )
+            ),
+            403: "Forbidden - Only teachers can access this."
+        }
+    )
+    def get(self, request):
+        user = request.user
+        
+       
+        if getattr(user, 'role', '') != 'TEACHER':
+            return Response({"error": "Only teachers can access the university department list."}, status=status.HTTP_403_FORBIDDEN)
+        
+        
+        departments = Department.objects.filter(is_active=True).order_by('name')
+        
+       
+        dept_data = departments.values('id', 'name') 
+        
+        return Response({
+            "status": "success",
+            "total_departments": departments.count(),
+            "data": list(dept_data)
+        }, status=status.HTTP_200_OK)

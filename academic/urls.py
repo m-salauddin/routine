@@ -5,9 +5,9 @@ from rest_framework.routers import DefaultRouter
 
 from .views import (
     AdminCancelClassView, DepartmentRoutineView, DepartmentViewSet, SemesterViewSet, CourseViewSet, SystemSettingView, SystemSnapshotView,TeacherSwapRequestView, 
-    TimeSlotViewSet, RoomViewSet, GenerateRoutineView, 
+    TimeSlotViewSet, RoomViewSet, GenerateRoutineView, NoticeDetailView,
     RoutineListView, RollbackRoutineView, TeacherCancelClassView ,ExcelImportView, ExcelExportView,
-    ManualRoutineUpdateView, RoutineSwapView,SystemExcelSyncView,
+    ManualRoutineUpdateView, RoutineSwapView,SystemExcelSyncView,UniversityDepartmentListView,
     SystemSnapshotView,NotificationListView, UnreadNotificationCountView, MarkNotificationReadView,RecentActivityLogView, AllActivityLogView,
     HideActivityLogView,FixedClassScheduleListCreateView, FixedClassScheduleDetailView,NoticeDetailView,NoticeListCreateView
 )
@@ -49,6 +49,7 @@ urlpatterns = [
     path('api/fixed-schedules/<int:pk>/', FixedClassScheduleDetailView.as_view(), name='fixed-schedules-detail'),
     path('notices/', NoticeListCreateView.as_view(), name='notice-list-create'),
     path('notices/<int:pk>/', NoticeDetailView.as_view(), name='notice-detail'),
+    path('departments-view/', UniversityDepartmentListView.as_view(), name='all-departments'),
  
  
 ]
