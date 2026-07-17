@@ -180,7 +180,6 @@ def prepare_prioritized_sessions(courses, all_active_rooms, fixed_counts=None, c
         
         groups = [None]
         if is_lab_course:
-            # Check if this course is explicitly marked as combined in Fixed tables
             if course.id in course_fixed_groups and None in course_fixed_groups[course.id]:
                 groups = [None]
             elif valid_rooms and valid_rooms[0].capacity < course.student_count:
@@ -412,13 +411,33 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
                 def calculate_slot_score(start_idx):
                     score = 0
                     
-                    # --- NEW LOGIC: 1. Center Gravity (মাঝখানের স্লটকে অগ্রাধিকার দেওয়া) ---
+                    # 1. Base Gravity (Center vs Edge)
                     middle_idx = total_slots / 2.0
                     block_center = start_idx + (duration / 2.0)
                     dist_from_center = abs(middle_idx - block_center)
-                    score += int((total_slots - dist_from_center) * 10)
                     
-                    # --- NEW LOGIC: 2. Clustering Bonus / Gap Penalty (গ্যাপ কমানো) ---
+                    is_isolated_lab = False
+                    if is_lab and group_name is not None:
+                        sibling_busy = False
+                        for w_slot in time_slots[start_idx : start_idx + duration]:
+                            check_key = (day.id, w_slot.id, course.department.id, course.semester.id)
+                            groups_here = constraints.batch_slot_groups.get(check_key, set())
+                            if any(g for g in groups_here if g is not None and g != group_name):
+                                sibling_busy = True
+                                break
+                        if not sibling_busy:
+                            is_isolated_lab = True
+
+                    if not is_lab: # Theory: Pull to center
+                        score += int((total_slots - dist_from_center) * 10)
+                    elif is_isolated_lab: # Isolated Lab: Pull to Edges
+                        score += int(dist_from_center * 15)
+                        if start_idx == 0 or start_idx + duration == total_slots:
+                            score += 150 # Absolute Edge Bonus
+                    else: # Parallel Lab
+                        score += int((total_slots - dist_from_center) * 5)
+                        
+                    # 2. Clustering Bonus / Gap Penalty (Strict Zero-Gap Policy)
                     if occupied_slots:
                         min_dist = float('inf')
                         for o in occupied_slots:
@@ -427,20 +446,20 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
                             if dist < min_dist: min_dist = dist
                         
                         if min_dist == 0:
-                            score += 200  # একদম গায়ে লেগে থাকলে বিশাল বোনাস
+                            score += 250  # No Gap! Big Bonus
                         else:
-                            score -= (min_dist * 50)  # গ্যাপ তৈরি করলে পেনাল্টি
+                            score -= (min_dist * 60)  # Gap Penalty!
                             
-                    # 3. Continuous class balancing (টানা ক্লাসের হিসাব - existing logic)
+                    # 3. Continuous class balancing
                     left_count, right_count, l_idx, r_idx = 0, 0, start_idx - 1, start_idx + duration
                     while l_idx in occupied_slots and l_idx not in constraints.lunch_indices:
                         left_count += 1; l_idx -= 1
                     while r_idx in occupied_slots and r_idx not in constraints.lunch_indices:
                         right_count += 1; r_idx += 1
-                    if left_count + duration + right_count == 3:
-                        score += 15 
+                    if left_count + duration + right_count >= 3:
+                        score -= 20 
                         
-                    # 4. Parallel Groups Bonus (ল্যাবের প্যারালাল গ্রুপের হিসাব - existing logic)
+                    # 4. Smart Parallel Groups Bonus (Cross-Scheduling)
                     if group_name is not None:
                         parallel_bonus = 0
                         for w_slot in time_slots[start_idx : start_idx + duration]:
@@ -448,7 +467,7 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
                             groups_here = constraints.batch_slot_groups.get(check_key, set())
                             sibling_groups = [g for g in groups_here if g is not None and g != group_name]
                             if sibling_groups:
-                                parallel_bonus += 300  
+                                parallel_bonus += 500  # Force Parallel Placement!
                         score += parallel_bonus
                     
                     return score
@@ -494,13 +513,31 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
                     def calculate_fallback_score(start_idx):
                         score = 0
                         
-                        # --- NEW LOGIC: Center Gravity ---
                         middle_idx = total_slots / 2.0
                         block_center = start_idx + (duration / 2.0)
                         dist_from_center = abs(middle_idx - block_center)
-                        score += int((total_slots - dist_from_center) * 10)
+                        
+                        is_isolated_lab = False
+                        if is_lab and group_name is not None:
+                            sibling_busy = False
+                            for w_slot in time_slots[start_idx : start_idx + duration]:
+                                check_key = (day.id, w_slot.id, course.department.id, course.semester.id)
+                                groups_here = constraints.batch_slot_groups.get(check_key, set())
+                                if any(g for g in groups_here if g is not None and g != group_name):
+                                    sibling_busy = True
+                                    break
+                            if not sibling_busy:
+                                is_isolated_lab = True
 
-                        # --- NEW LOGIC: Clustering Bonus / Gap Penalty ---
+                        if not is_lab: 
+                            score += int((total_slots - dist_from_center) * 10)
+                        elif is_isolated_lab:
+                            score += int(dist_from_center * 15)
+                            if start_idx == 0 or start_idx + duration == total_slots:
+                                score += 150 
+                        else:
+                            score += int((total_slots - dist_from_center) * 5)
+
                         if occupied_slots:
                             min_dist = float('inf')
                             for o in occupied_slots:
@@ -508,9 +545,9 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
                                 if dist < 0: dist = 0
                                 if dist < min_dist: min_dist = dist
                             if min_dist == 0:
-                                score += 200
+                                score += 250
                             else:
-                                score -= (min_dist * 50)
+                                score -= (min_dist * 60)
                                 
                         if group_name is not None:
                             parallel_bonus = 0
@@ -519,7 +556,7 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
                                 groups_here = constraints.batch_slot_groups.get(check_key, set())
                                 sibling_groups = [g for g in groups_here if g is not None and g != group_name]
                                 if sibling_groups:
-                                    parallel_bonus += 300  
+                                    parallel_bonus += 500  
                             score += parallel_bonus
                             
                         return score
