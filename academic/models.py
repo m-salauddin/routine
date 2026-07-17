@@ -63,7 +63,6 @@ class Semester(TimeStampedModel):
     def __str__(self): return self.name
 
 # --- NEW: BATCH MODEL FOR ALUMNI & LIFECYCLE MANAGEMENT ---
-
 class Batch(TimeStampedModel):
     STATUS_CHOICES = (
         ('ACTIVE', 'Active (Currently Studying)'),
@@ -76,18 +75,18 @@ class Batch(TimeStampedModel):
 
     class Meta:
         verbose_name_plural = "Batches"
+        # [NEW] এই লাইনের কারণে একই ডিপার্টমেন্টে একই নামের ব্যাচ দুইবার তৈরি করা যাবে না
+        unique_together = ('name', 'department') 
 
     def __str__(self):
         sem_name = self.current_semester.name if self.current_semester else "No Semester"
         return f"{self.name} - {self.department.name} ({sem_name})"
 
- 
     def save(self, *args, **kwargs):
         is_new = self.pk is None
         old_semester = None
         old_status = None
         
-       
         if not is_new:
             old_batch = Batch.objects.filter(pk=self.pk).first()
             if old_batch:
@@ -96,7 +95,6 @@ class Batch(TimeStampedModel):
 
         super().save(*args, **kwargs)
 
-       
         from django.contrib.auth import get_user_model
         User = get_user_model()
 
@@ -110,7 +108,6 @@ class Batch(TimeStampedModel):
                 # AUTOMATION 2: If batch is marked as GRADUATED, deactivate students and clear their semester
                 User.objects.filter(batch=self, role='STUDENT').update(semester=None, is_active=False)
 
-                
 class Room(TimeStampedModel):
     room_number = models.CharField(max_length=50, unique=True)
     capacity = models.PositiveIntegerField(help_text="Student capacity of this room")

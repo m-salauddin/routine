@@ -2154,7 +2154,7 @@ from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
 from drf_yasg.utils import swagger_auto_schema
 from drf_yasg import openapi
-# from .models import Department # নিশ্চিত করুন Department ইমপোর্ট করা আছে
+from .models import Department 
 
 class UniversityDepartmentListView(APIView):
     permission_classes = [IsAuthenticated]
