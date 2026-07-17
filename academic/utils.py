@@ -25,12 +25,13 @@ class ScheduleConstraint:
         
         total_days = max(1, len(days))
         
+        # [UPDATE] Teacher limits are safe, but student limits are strictly balanced now
         self.teacher_limits = {
-            tid: math.ceil(total / total_days) + 3 
+            tid: math.ceil(total / total_days) + 2 
             for tid, total in teacher_totals.items()
         }
         self.batch_limits = {
-            bid: math.ceil(total / total_days) + 3 
+            bid: math.ceil(total / total_days) + 1  # Strict load balancing for students
             for bid, total in batch_totals.items()
         }
 
@@ -166,6 +167,33 @@ class ScheduleConstraint:
             self.batch_schedule_map[b_map_key] = set()
         self.batch_schedule_map[b_map_key].add(slot_idx)
 
+# [CRITICAL BUG FIX 1]: Strict Capacity Checking Enforced
+def get_valid_rooms_for_course(course, all_active_rooms, is_lab, required_capacity=None):
+    if course.fixed_room and course.fixed_room.is_active:
+        return [course.fixed_room]
+
+    base_matching_rooms = [
+        r for r in all_active_rooms
+        if r.room_type_id == course.course_type_id 
+        and (not course.course_sub_type_id or r.room_sub_type_id == course.course_sub_type_id)
+    ]
+
+    dept_to_search = course.preferred_room_department or course.offering_department or course.department
+    valid_rooms = [r for r in base_matching_rooms if r.department_id == dept_to_search.id]
+
+    if not valid_rooms:
+        return []
+
+    # If required_capacity is None, we just return largest rooms first (used for calculating how many groups to divide into)
+    if required_capacity is None:
+        valid_rooms.sort(key=lambda x: x.capacity, reverse=True)
+        return valid_rooms
+        
+    # STRICT CAPACITY FILTER: No more putting 50 students in a 25 capacity room!
+    rooms_fitting = [r for r in valid_rooms if r.capacity >= required_capacity]
+    rooms_fitting.sort(key=lambda x: x.capacity) # Smallest room that fits perfectly gets priority
+
+    return rooms_fitting
 
 def prepare_prioritized_sessions(courses, all_active_rooms, fixed_counts=None, course_fixed_groups=None):
     if fixed_counts is None:
@@ -176,15 +204,21 @@ def prepare_prioritized_sessions(courses, all_active_rooms, fixed_counts=None, c
     all_sessions = []
     for course in courses:
         is_lab_course = course.course_type and 'lab' in course.course_type.name.lower()
-        valid_rooms = get_valid_rooms_for_course(course, all_active_rooms, is_lab_course)
+        
+        # Send None to get biggest room for initial group division calculation
+        valid_rooms = get_valid_rooms_for_course(course, all_active_rooms, is_lab_course, None)
         
         groups = [None]
+        req_capacity = course.student_count
+        
         if is_lab_course:
             if course.id in course_fixed_groups and None in course_fixed_groups[course.id]:
                 groups = [None]
             elif valid_rooms and valid_rooms[0].capacity < course.student_count:
                 num_groups = math.ceil(course.student_count / valid_rooms[0].capacity)
                 groups = [f"Group {chr(65+i)}" for i in range(num_groups)]
+                # Dynamically set the capacity requirement for the divided group
+                req_capacity = math.ceil(course.student_count / num_groups)
             
         total_credits = course.credits if course.credits > 0 else 1
         fixed_bonus = 1000 if course.fixed_room else 0
@@ -202,15 +236,27 @@ def prepare_prioritized_sessions(courses, all_active_rooms, fixed_counts=None, c
                 temp_rem = remaining_credits
                 while temp_rem >= 2:
                     credits_filled += 2
-                    all_sessions.append({'course': course, 'group': grp, 'duration': 2, 'priority_score': (credits_filled / total_credits) + fixed_bonus, 'is_lab': True})
+                    all_sessions.append({
+                        'course': course, 'group': grp, 'duration': 2, 
+                        'priority_score': (credits_filled / total_credits) + fixed_bonus, 
+                        'is_lab': True, 'req_capacity': req_capacity
+                    })
                     temp_rem -= 2
                 if temp_rem > 0:
                     credits_filled += 1
-                    all_sessions.append({'course': course, 'group': grp, 'duration': 1, 'priority_score': (credits_filled / total_credits) + fixed_bonus, 'is_lab': True})
+                    all_sessions.append({
+                        'course': course, 'group': grp, 'duration': 1, 
+                        'priority_score': (credits_filled / total_credits) + fixed_bonus, 
+                        'is_lab': True, 'req_capacity': req_capacity
+                    })
             else:
                 for _ in range(remaining_credits):
                     credits_filled += 1
-                    all_sessions.append({'course': course, 'group': grp, 'duration': 1, 'priority_score': (credits_filled / total_credits) + fixed_bonus, 'is_lab': False})
+                    all_sessions.append({
+                        'course': course, 'group': grp, 'duration': 1, 
+                        'priority_score': (credits_filled / total_credits) + fixed_bonus, 
+                        'is_lab': False, 'req_capacity': req_capacity
+                    })
 
     random.shuffle(all_sessions)
     all_sessions.sort(key=lambda x: (
@@ -221,36 +267,6 @@ def prepare_prioritized_sessions(courses, all_active_rooms, fixed_counts=None, c
     ), reverse=True)
     
     return all_sessions
-
-
-def get_valid_rooms_for_course(course, all_active_rooms, is_lab):
-    if course.fixed_room and course.fixed_room.is_active:
-        return [course.fixed_room]
-
-    base_matching_rooms = [
-        r for r in all_active_rooms
-        if r.room_type_id == course.course_type_id 
-        and (not course.course_sub_type_id or r.room_sub_type_id == course.course_sub_type_id)
-    ]
-
-    dept_to_search = course.preferred_room_department or course.offering_department or course.department
-    valid_rooms = [r for r in base_matching_rooms if r.department_id == dept_to_search.id]
-
-    if not valid_rooms:
-        return []
-
-    if is_lab:
-        valid_rooms.sort(key=lambda x: x.capacity, reverse=True)
-        return valid_rooms
-    else:
-        rooms_fitting = [r for r in valid_rooms if r.capacity >= course.student_count]
-        rooms_not_fitting = [r for r in valid_rooms if r.capacity < course.student_count]
-        
-        rooms_fitting.sort(key=lambda x: x.capacity) 
-        rooms_not_fitting.sort(key=lambda x: x.capacity, reverse=True) 
-        
-        return rooms_fitting + rooms_not_fitting
-
 
 def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=False):
     setting = SystemSetting.objects.first()
@@ -306,7 +322,7 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
         
         for c in courses_to_schedule:
             is_lab = c.course_type and 'lab' in c.course_type.name.lower()
-            valid_rooms = get_valid_rooms_for_course(c, all_active_rooms, is_lab)
+            valid_rooms = get_valid_rooms_for_course(c, all_active_rooms, is_lab, None)
             
             num_groups = 1
             if is_lab:
@@ -342,7 +358,7 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
             slot = fs.time_slot
             is_lab = course.course_type and 'lab' in course.course_type.name.lower()
             
-            valid_rooms = get_valid_rooms_for_course(course, all_active_rooms, is_lab)
+            valid_rooms = get_valid_rooms_for_course(course, all_active_rooms, is_lab, None)
             
             groups_to_schedule = [fs.group_name]
                 
@@ -378,13 +394,15 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
         for session in sorted_sessions:
             course = session['course']
             duration = session['duration']
-            is_lab = session.get('is_lab', False)
+            is_lab = session['is_lab']
             group_name = session['group']  
+            req_capacity = session.get('req_capacity', course.student_count)
             
-            valid_rooms = get_valid_rooms_for_course(course, all_active_rooms, is_lab)
+            # Request valid rooms strictly enforcing required capacity
+            valid_rooms = get_valid_rooms_for_course(course, all_active_rooms, is_lab, req_capacity)
 
             if not valid_rooms:
-                dropped_sessions.append(f"Dropped: {course.course_name} (No matching department room)")
+                dropped_sessions.append(f"Dropped: {course.course_name} (No room available with capacity >= {req_capacity})")
                 continue
 
             group_assigned = False
@@ -411,7 +429,11 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
                 def calculate_slot_score(start_idx):
                     score = 0
                     
-                    # 1. Base Gravity (Center vs Edge)
+                    # [UPDATE] 1. Dynamic Load Balancing Penalty (Spread classes properly)
+                    day_load_penalty = constraints.batch_day_loads.get((course.department.id, course.semester.id, day.id), 0) * 80
+                    score -= day_load_penalty
+                    
+                    # 2. Base Gravity (Center vs Edge)
                     middle_idx = total_slots / 2.0
                     block_center = start_idx + (duration / 2.0)
                     dist_from_center = abs(middle_idx - block_center)
@@ -428,16 +450,16 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
                         if not sibling_busy:
                             is_isolated_lab = True
 
-                    if not is_lab: # Theory: Pull to center
+                    if not is_lab: 
                         score += int((total_slots - dist_from_center) * 10)
-                    elif is_isolated_lab: # Isolated Lab: Pull to Edges
+                    elif is_isolated_lab: 
                         score += int(dist_from_center * 15)
                         if start_idx == 0 or start_idx + duration == total_slots:
-                            score += 150 # Absolute Edge Bonus
-                    else: # Parallel Lab
+                            score += 150 
+                    else: 
                         score += int((total_slots - dist_from_center) * 5)
                         
-                    # 2. Clustering Bonus / Gap Penalty (Strict Zero-Gap Policy)
+                    # 3. Clustering Bonus / Gap Penalty (Strict Zero-Gap Policy)
                     if occupied_slots:
                         min_dist = float('inf')
                         for o in occupied_slots:
@@ -446,11 +468,11 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
                             if dist < min_dist: min_dist = dist
                         
                         if min_dist == 0:
-                            score += 250  # No Gap! Big Bonus
+                            score += 250  
                         else:
-                            score -= (min_dist * 60)  # Gap Penalty!
+                            score -= (min_dist * 60)  
                             
-                    # 3. Continuous class balancing
+                    # 4. Continuous class balancing
                     left_count, right_count, l_idx, r_idx = 0, 0, start_idx - 1, start_idx + duration
                     while l_idx in occupied_slots and l_idx not in constraints.lunch_indices:
                         left_count += 1; l_idx -= 1
@@ -459,7 +481,7 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
                     if left_count + duration + right_count >= 3:
                         score -= 20 
                         
-                    # 4. Smart Parallel Groups Bonus (Cross-Scheduling)
+                    # [UPDATE] 5. Smart Parallel Groups Massive Priority
                     if group_name is not None:
                         parallel_bonus = 0
                         for w_slot in time_slots[start_idx : start_idx + duration]:
@@ -467,7 +489,7 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
                             groups_here = constraints.batch_slot_groups.get(check_key, set())
                             sibling_groups = [g for g in groups_here if g is not None and g != group_name]
                             if sibling_groups:
-                                parallel_bonus += 500  # Force Parallel Placement!
+                                parallel_bonus += 10000  # Massive Priority Overrides Everything!
                         score += parallel_bonus
                     
                     return score
@@ -513,6 +535,9 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
                     def calculate_fallback_score(start_idx):
                         score = 0
                         
+                        day_load_penalty = constraints.batch_day_loads.get((course.department.id, course.semester.id, day.id), 0) * 80
+                        score -= day_load_penalty
+
                         middle_idx = total_slots / 2.0
                         block_center = start_idx + (duration / 2.0)
                         dist_from_center = abs(middle_idx - block_center)
@@ -556,7 +581,7 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
                                 groups_here = constraints.batch_slot_groups.get(check_key, set())
                                 sibling_groups = [g for g in groups_here if g is not None and g != group_name]
                                 if sibling_groups:
-                                    parallel_bonus += 500  
+                                    parallel_bonus += 10000  
                             score += parallel_bonus
                             
                         return score
