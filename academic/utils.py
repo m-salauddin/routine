@@ -241,15 +241,14 @@ def get_valid_rooms_for_course(course, all_active_rooms, is_lab):
         return []
 
     if is_lab:
-        # Sorts by capacity descending (biggest room first) - exactly as requested
         valid_rooms.sort(key=lambda x: x.capacity, reverse=True)
         return valid_rooms
     else:
         rooms_fitting = [r for r in valid_rooms if r.capacity >= course.student_count]
         rooms_not_fitting = [r for r in valid_rooms if r.capacity < course.student_count]
         
-        rooms_fitting.sort(key=lambda x: x.capacity) # Smallest room that fits
-        rooms_not_fitting.sort(key=lambda x: x.capacity, reverse=True) # Biggest room available if none fits
+        rooms_fitting.sort(key=lambda x: x.capacity) 
+        rooms_not_fitting.sort(key=lambda x: x.capacity, reverse=True) 
         
         return rooms_fitting + rooms_not_fitting
 
@@ -297,7 +296,6 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
                 continue
             batch_constraints_dict[key] = c.constraint_type
 
-        # Track which classes have been explicitly grouped in the Fixed schedules
         course_fixed_groups = {}
         for fs in fixed_schedules:
             if fs.course_id not in course_fixed_groups:
@@ -347,7 +345,6 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
             
             valid_rooms = get_valid_rooms_for_course(course, all_active_rooms, is_lab)
             
-            # [CRITICAL UPDATE] Only schedule the exact group specified by the admin!
             groups_to_schedule = [fs.group_name]
                 
             for grp in groups_to_schedule:
@@ -414,11 +411,14 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
                 
                 def calculate_slot_score(start_idx):
                     score = 0
-                    if start_idx == 0 or start_idx + duration == total_slots:
-                        score += 100
-                        
-                    score += (start_idx * 2)
-
+                    
+                    # --- NEW LOGIC: 1. Center Gravity (মাঝখানের স্লটকে অগ্রাধিকার দেওয়া) ---
+                    middle_idx = total_slots / 2.0
+                    block_center = start_idx + (duration / 2.0)
+                    dist_from_center = abs(middle_idx - block_center)
+                    score += int((total_slots - dist_from_center) * 10)
+                    
+                    # --- NEW LOGIC: 2. Clustering Bonus / Gap Penalty (গ্যাপ কমানো) ---
                     if occupied_slots:
                         min_dist = float('inf')
                         for o in occupied_slots:
@@ -427,18 +427,20 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
                             if dist < min_dist: min_dist = dist
                         
                         if min_dist == 0:
-                            score -= 50
+                            score += 200  # একদম গায়ে লেগে থাকলে বিশাল বোনাস
                         else:
-                            score += (min_dist * 20)
+                            score -= (min_dist * 50)  # গ্যাপ তৈরি করলে পেনাল্টি
                             
+                    # 3. Continuous class balancing (টানা ক্লাসের হিসাব - existing logic)
                     left_count, right_count, l_idx, r_idx = 0, 0, start_idx - 1, start_idx + duration
                     while l_idx in occupied_slots and l_idx not in constraints.lunch_indices:
                         left_count += 1; l_idx -= 1
                     while r_idx in occupied_slots and r_idx not in constraints.lunch_indices:
                         right_count += 1; r_idx += 1
                     if left_count + duration + right_count == 3:
-                        score += 15
+                        score += 15 
                         
+                    # 4. Parallel Groups Bonus (ল্যাবের প্যারালাল গ্রুপের হিসাব - existing logic)
                     if group_name is not None:
                         parallel_bonus = 0
                         for w_slot in time_slots[start_idx : start_idx + duration]:
@@ -491,16 +493,25 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
                     
                     def calculate_fallback_score(start_idx):
                         score = 0
-                        if start_idx == 0 or start_idx + duration == total_slots: score += 100
+                        
+                        # --- NEW LOGIC: Center Gravity ---
+                        middle_idx = total_slots / 2.0
+                        block_center = start_idx + (duration / 2.0)
+                        dist_from_center = abs(middle_idx - block_center)
+                        score += int((total_slots - dist_from_center) * 10)
+
+                        # --- NEW LOGIC: Clustering Bonus / Gap Penalty ---
                         if occupied_slots:
                             min_dist = float('inf')
                             for o in occupied_slots:
                                 dist = start_idx - o - 1 if o < start_idx else o - (start_idx + duration)
                                 if dist < 0: dist = 0
                                 if dist < min_dist: min_dist = dist
-                            if min_dist == 0: score -= 50
-                            else: score += (min_dist * 20)
-                            
+                            if min_dist == 0:
+                                score += 200
+                            else:
+                                score -= (min_dist * 50)
+                                
                         if group_name is not None:
                             parallel_bonus = 0
                             for w_slot in time_slots[start_idx : start_idx + duration]:
