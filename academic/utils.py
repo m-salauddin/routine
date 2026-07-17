@@ -19,7 +19,6 @@ class ScheduleConstraint:
         self.teacher_daily_count = {}
         self.batch_daily_count = {}
         
-        # Room Load Balancer - Track how many times each room is used
         self.room_usage_count = {} 
         
         self.batch_constraints = batch_constraints_dict
@@ -27,7 +26,6 @@ class ScheduleConstraint:
         
         total_days = max(1, len(days))
         
-        # Dynamic Limits based on actual calculated loads (including split groups)
         self.teacher_limits = {
             tid: math.ceil(total / total_days) + 2 
             for tid, total in teacher_totals.items()
@@ -42,15 +40,12 @@ class ScheduleConstraint:
         self.batch_schedule_map = {}   
 
     def get_batch_day_load(self, dept_id, sem_id, day_id, group_name=None):
-        # Theory class load (Applies to all groups)
         common_load = self.batch_daily_count.get((dept_id, sem_id, day_id, None), 0)
         
-        # If calculating for a specific group, add theory + group's specific lab load
         if group_name:
             group_load = self.batch_daily_count.get((dept_id, sem_id, day_id, group_name), 0)
             return common_load + group_load
             
-        # If theory class, find the maximum load among all existing groups to ensure no group crosses limit
         max_group_load = 0
         for k, v in self.batch_daily_count.items():
             if k[0] == dept_id and k[1] == sem_id and k[2] == day_id and k[3] is not None:
@@ -204,12 +199,10 @@ def get_valid_rooms_for_course(course, all_active_rooms, is_lab, required_capaci
     if not valid_rooms:
         return []
 
-    # Return biggest room first when assessing max available capacity
     if required_capacity is None:
         valid_rooms.sort(key=lambda x: x.capacity, reverse=True)
         return valid_rooms
         
-    # Strictly enforce required capacity and optimize room selection
     rooms_fitting = [r for r in valid_rooms if r.capacity >= required_capacity]
     rooms_fitting.sort(key=lambda x: x.capacity) 
 
@@ -234,7 +227,6 @@ def prepare_prioritized_sessions(courses, all_active_rooms, fixed_counts=None, c
             if course.id in course_fixed_groups and None in course_fixed_groups[course.id]:
                 groups = [None]
             elif valid_rooms and valid_rooms[0].capacity < course.student_count:
-                # Grouping fallback: If even the biggest room is small, divide into groups
                 num_groups = math.ceil(course.student_count / valid_rooms[0].capacity)
                 groups = [f"Group {chr(65+i)}" for i in range(num_groups)]
                 req_capacity = math.ceil(course.student_count / num_groups)
@@ -339,7 +331,6 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
         teacher_totals = {}
         batch_totals = {}
         
-        # Pre-calculate accurate limits incorporating divided groups
         for c in courses_to_schedule:
             is_lab = c.course_type and 'lab' in c.course_type.name.lower()
             valid_rooms = get_valid_rooms_for_course(c, all_active_rooms, is_lab, None)
@@ -371,7 +362,6 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
         dropped_sessions = []
         routines_to_create = []
         
-        # 1. FIXED CLASSES - Placed First (VIP)
         for fs in fixed_schedules:
             course = fs.course
             day = fs.day
@@ -387,7 +377,6 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
                 if assigned_room and constraints.is_conflict(day, slot, course, assigned_room, grp, is_fixed=True):
                     assigned_room = None
                     
-                # Optional Room Handling: Automatically select best empty room if not specified
                 if not assigned_room:
                     valid_rooms.sort(key=lambda r: (r.capacity, constraints.room_usage_count.get(r.id, 0)))
                     for r in valid_rooms:
@@ -412,7 +401,6 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
         sorted_sessions = prepare_prioritized_sessions(courses_to_schedule, all_active_rooms, fixed_counts, course_fixed_groups)
         total_required = scheduled_count + len(sorted_sessions)
 
-        # 2. DYNAMIC SCHEDULING
         for session in sorted_sessions:
             course = session['course']
             duration = session['duration']
@@ -450,15 +438,13 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
                 def calculate_slot_score(start_idx):
                     score = 0
                     
-                    # 1. COMFORT ZONE PENALTY: Avoid edges (8 AM / 5 PM) unless necessary
                     for w in range(start_idx, start_idx + duration):
                         if w == 0: score -= 150 
                         elif w == 1: score -= 50
                         elif w == total_slots - 1: score -= 150
                         elif w == total_slots - 2: score -= 50
-                        else: score += 20  # Green Zone Bonus
+                        else: score += 20  
 
-                    # 2. MAGNETIC GRAVITY (Zero-Gap Policy & Edge Wrapping)
                     if occupied_slots:
                         min_dist = float('inf')
                         for o in occupied_slots:
@@ -467,11 +453,10 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
                             if dist < min_dist: min_dist = dist
                         
                         if min_dist == 0:
-                            score += 500  # Stick to cluster edge! (Zero Wait Time)
+                            score += 500  
                         else:
-                            score -= (min_dist * 100)  # Massive Gap Penalty
+                            score -= (min_dist * 100)  
                             
-                    # 3. Continuous limit checks
                     left_count, right_count, l_idx, r_idx = 0, 0, start_idx - 1, start_idx + duration
                     while l_idx in occupied_slots and l_idx not in constraints.lunch_indices:
                         left_count += 1; l_idx -= 1
@@ -480,7 +465,6 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
                     if left_count + duration + right_count >= 3:
                         score -= 50 
                         
-                    # 4. CROSS-SCHEDULING (Massive Parallel Priority for Groups)
                     if group_name is not None:
                         parallel_bonus = 0
                         for w_slot in time_slots[start_idx : start_idx + duration]:
@@ -488,7 +472,6 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
                             groups_here = constraints.batch_slot_groups.get(check_key, set())
                             sibling_groups = [g for g in groups_here if g is not None and g != group_name]
                             if sibling_groups:
-                                # Overrides comfort zone penalties to force students to study together!
                                 parallel_bonus += 10000  
                         score += parallel_bonus
                     
@@ -506,7 +489,6 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
                     window_slots = time_slots[i : i + duration]
                     selected_room = None
                     
-                    # ROOM LOAD BALANCING
                     valid_rooms.sort(key=lambda r: (r.capacity, constraints.room_usage_count.get(r.id, 0)))
                     
                     for room in valid_rooms:
@@ -592,6 +574,40 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
                             scheduled_count += 1
 
             if not group_assigned:
+                # =========================================================================
+                # [NEW] DYNAMIC FALLBACK: If big room is busy, intercept drop and split dynamically!
+                # =========================================================================
+                if is_lab and group_name is None:
+                    all_lab_rooms = get_valid_rooms_for_course(course, all_active_rooms, True, None)
+                    smaller_rooms = [r for r in all_lab_rooms if r.capacity < course.student_count]
+                    
+                    if smaller_rooms:
+                        split_cap = smaller_rooms[0].capacity
+                    else:
+                        split_cap = max(1, course.student_count // 2)
+                        
+                    num_groups = math.ceil(course.student_count / split_cap)
+                    
+                    if num_groups > 1:
+                        new_req_capacity = math.ceil(course.student_count / num_groups)
+                        
+                        # Dynamically increase limits to accommodate the extra groups
+                        if course.teacher:
+                            constraints.teacher_limits[course.teacher.id] = constraints.teacher_limits.get(course.teacher.id, 4) + (duration * (num_groups - 1))
+                        batch_key = (course.department.id, course.semester.id)
+                        constraints.batch_limits[batch_key] = constraints.batch_limits.get(batch_key, 6) + (duration * (num_groups - 1))
+                        
+                        new_groups = [f"Group {chr(65+i)}" for i in range(num_groups)]
+                        for grp in new_groups:
+                            sorted_sessions.append({
+                                'course': course, 'group': grp, 'duration': duration, 
+                                'priority_score': session['priority_score'] + 5000, 
+                                'is_lab': True, 'req_capacity': new_req_capacity
+                            })
+                        
+                        total_required += (num_groups - 1)
+                        continue # Skip the drop! We will schedule the pieces!
+
                 grp_str = f" ({group_name})" if group_name else ""
                 dropped_sessions.append(f"Dropped: {course.course_name}{grp_str} (Global conflict)")
 
