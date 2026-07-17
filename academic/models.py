@@ -438,6 +438,9 @@ class Notification(TimeStampedModel):
 #         return f"To {self.recipient.username} - {self.title} [Read: {self.is_read}]"
 
 
+
+
+
 # ==============================================================================
 # 7. SYSTEM ACTIVITY LOGS (Audit Trail)
 # ==============================================================================
@@ -476,3 +479,60 @@ class ActivityLog(models.Model):
     def __str__(self):
         actor_name = self.actor.username if self.actor else "System"
         return f"[{self.severity}] {actor_name}: {self.action_description}"
+    
+
+
+
+# academic/models.py
+from django.db import models
+
+
+class AlgorithmConfig(models.Model):
+    # [Parallel Classes]
+    parallel_bonus = models.IntegerField(
+        default=50000,
+        help_text="Bonus for scheduling parallel group classes. (Low: 1000 | Mid: 10000 | High: 50000+). The current value is intentionally very high to strongly prioritize parallel scheduling."
+    )
+
+    # [First and Last Time Slot]
+    edge_slot_penalty = models.IntegerField(
+        default=2000,
+        help_text="Penalty for assigning classes to the very first or last time slot of the day. (Low: 150 | Mid: 500 | High: 2000+). A higher value makes the algorithm avoid these slots unless necessary."
+    )
+
+    # [Gap or Waiting Time]
+    zero_gap_bonus = models.IntegerField(
+        default=1000,
+        help_text="Bonus for schedules with no gaps between classes. (Low: 200 | Mid: 500 | High: 1000+)."
+    )
+    gap_penalty_per_slot = models.IntegerField(
+        default=500,
+        help_text="Penalty applied for each empty time slot (gap) between classes. (Low: 50 | Mid: 200 | High: 500+)."
+    )
+
+    # [Schedule Balancing]
+    center_gravity_bonus = models.IntegerField(
+        default=50,
+        help_text="Bonus for assigning classes to middle (comfort zone) time slots. (Low: 10 | Mid: 50 | High: 100+)."
+    )
+    continuous_class_penalty = models.IntegerField(
+        default=100,
+        help_text="Penalty for scheduling 3–4 consecutive classes without a break. (Low: 20 | Mid: 50 | High: 100+)."
+    )
+    day_load_penalty_multiplier = models.IntegerField(
+        default=150,
+        help_text="Penalty multiplier for overloading a single day with too many classes. (Low: 50 | Mid: 100 | High: 150+)."
+    )
+
+    class Meta:
+        verbose_name = "Algorithm Configuration"
+        verbose_name_plural = "Algorithm Configuration"
+
+    def __str__(self):
+        return "Routine Algorithm Rule Engine"
+
+    def save(self, *args, **kwargs):
+        # Singleton logic: ensures that only one record exists in this table
+        if not self.pk and AlgorithmConfig.objects.exists():
+            self.pk = AlgorithmConfig.objects.first().pk
+        super().save(*args, **kwargs)

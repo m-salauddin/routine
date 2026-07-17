@@ -285,3 +285,16 @@ class ActivityLogSerializer(serializers.ModelSerializer):
             'id', 'actor', 'actor_name', 'action_description', 
             'severity', 'created_at', 'created_at_formatted'
         ]
+
+
+
+# academic/serializers.py
+from rest_framework import serializers
+from .models import AlgorithmConfig
+
+class AlgorithmConfigSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = AlgorithmConfig
+        fields = '__all__'
+
+

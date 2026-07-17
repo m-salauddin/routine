@@ -321,3 +321,19 @@ class RoutineBackupAdmin(admin.ModelAdmin):
     
     def has_change_permission(self, request, obj=None):
         return False
+    
+
+
+# academic/admin.py
+from django.contrib import admin
+from .models import AlgorithmConfig
+
+@admin.register(AlgorithmConfig)
+class AlgorithmConfigAdmin(admin.ModelAdmin):
+    list_display = ('__str__', 'parallel_bonus', 'edge_slot_penalty', 'zero_gap_bonus')
+
+    # শুধু একটি ডাটা থাকবে, তাই নতুন করে Add করার অপশন অফ করে দিচ্ছি (যদি অলরেডি একটা থাকে)
+    def has_add_permission(self, request):
+        if AlgorithmConfig.objects.exists():
+            return False
+        return True

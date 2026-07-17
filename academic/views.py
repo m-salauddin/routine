@@ -2209,3 +2209,35 @@ class UniversityDepartmentListView(APIView):
             "total_departments": departments.count(),
             "data": list(dept_data)
         }, status=status.HTTP_200_OK)
+    
+
+
+
+
+
+# academic/views.py
+from rest_framework.views import APIView
+from rest_framework.response import Response
+from rest_framework import status
+from .models import AlgorithmConfig
+from .serializers import AlgorithmConfigSerializer
+
+class AlgorithmConfigAPIView(APIView):
+    def get_object(self):
+        # ডাটাবেজে কনফিগারেশন না থাকলে অটোমেটিক ডিফল্ট ভ্যালু দিয়ে একটা তৈরি করে নেবে
+        obj, created = AlgorithmConfig.objects.get_or_create(id=1)
+        return obj
+
+    def get(self, request):
+        config = self.get_object()
+        serializer = AlgorithmConfigSerializer(config)
+        return Response(serializer.data)
+
+    def put(self, request):
+        config = self.get_object()
+        serializer = AlgorithmConfigSerializer(config, data=request.data, partial=True)
+        if serializer.is_valid():
+            serializer.save()
+            return Response(serializer.data)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+

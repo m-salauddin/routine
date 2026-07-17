@@ -4,7 +4,8 @@ import math
 from django.db import transaction
 from .models import (
     Day, Course, TimeSlot, RoutineEntry, Room, 
-    SystemSetting, RoutineBackup, BatchTimeConstraint, FixedClassSchedule
+    SystemSetting, RoutineBackup, BatchTimeConstraint, FixedClassSchedule,
+    AlgorithmConfig  
 )
 
 class ScheduleConstraint:
@@ -284,6 +285,22 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
     if setting and setting.is_routine_locked:
         return {"status": "Locked", "message": "System is locked. Cannot generate routine."}
 
+    # =========================================================================
+    # [NEW] Load Dynamic Configuration from the Database
+    # =========================================================================
+    config_obj = AlgorithmConfig.objects.first()
+    
+    class DefaultConfig:
+        parallel_bonus = 50000
+        edge_slot_penalty = 2000
+        zero_gap_bonus = 1000
+        gap_penalty_per_slot = 500
+        center_gravity_bonus = 50
+        continuous_class_penalty = 100
+        day_load_penalty_multiplier = 150
+        
+    config = config_obj if config_obj else DefaultConfig()
+
     with transaction.atomic():
         base_courses = Course.objects.select_related(
             'teacher', 'department', 'semester', 'course_type', 'course_sub_type', 
@@ -438,13 +455,15 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
                 def calculate_slot_score(start_idx):
                     score = 0
                     
+                    # [DYNAMIC] Edge Control & Comfort Zone
                     for w in range(start_idx, start_idx + duration):
-                        if w == 0: score -= 150 
-                        elif w == 1: score -= 50
-                        elif w == total_slots - 1: score -= 150
-                        elif w == total_slots - 2: score -= 50
-                        else: score += 20  
+                        if w == 0: score -= config.edge_slot_penalty 
+                        elif w == 1: score -= (config.edge_slot_penalty // 3)
+                        elif w == total_slots - 1: score -= config.edge_slot_penalty
+                        elif w == total_slots - 2: score -= (config.edge_slot_penalty // 3)
+                        else: score += config.center_gravity_bonus  
 
+                    # [DYNAMIC] Magnetic Gravity & Gap Penalty
                     if occupied_slots:
                         min_dist = float('inf')
                         for o in occupied_slots:
@@ -453,18 +472,20 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
                             if dist < min_dist: min_dist = dist
                         
                         if min_dist == 0:
-                            score += 500  
+                            score += config.zero_gap_bonus  
                         else:
-                            score -= (min_dist * 100)  
+                            score -= (min_dist * config.gap_penalty_per_slot)  
                             
+                    # [DYNAMIC] Continuous class balancing
                     left_count, right_count, l_idx, r_idx = 0, 0, start_idx - 1, start_idx + duration
                     while l_idx in occupied_slots and l_idx not in constraints.lunch_indices:
                         left_count += 1; l_idx -= 1
                     while r_idx in occupied_slots and r_idx not in constraints.lunch_indices:
                         right_count += 1; r_idx += 1
                     if left_count + duration + right_count >= 3:
-                        score -= 50 
+                        score -= config.continuous_class_penalty 
                         
+                    # [DYNAMIC] Cross-Scheduling Parallel Groups
                     if group_name is not None:
                         parallel_bonus = 0
                         for w_slot in time_slots[start_idx : start_idx + duration]:
@@ -472,7 +493,7 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
                             groups_here = constraints.batch_slot_groups.get(check_key, set())
                             sibling_groups = [g for g in groups_here if g is not None and g != group_name]
                             if sibling_groups:
-                                parallel_bonus += 10000  
+                                parallel_bonus += config.parallel_bonus  
                         score += parallel_bonus
                     
                     return score
@@ -520,13 +541,15 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
                     def calculate_fallback_score(start_idx):
                         score = 0
                         
+                        # [DYNAMIC] Edge Control & Comfort Zone
                         for w in range(start_idx, start_idx + duration):
-                            if w == 0: score -= 150
-                            elif w == 1: score -= 50
-                            elif w == total_slots - 1: score -= 150
-                            elif w == total_slots - 2: score -= 50
-                            else: score += 20
+                            if w == 0: score -= config.edge_slot_penalty
+                            elif w == 1: score -= (config.edge_slot_penalty // 3)
+                            elif w == total_slots - 1: score -= config.edge_slot_penalty
+                            elif w == total_slots - 2: score -= (config.edge_slot_penalty // 3)
+                            else: score += config.center_gravity_bonus
 
+                        # [DYNAMIC] Magnetic Gravity & Gap Penalty
                         if occupied_slots:
                             min_dist = float('inf')
                             for o in occupied_slots:
@@ -534,10 +557,11 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
                                 if dist < 0: dist = 0
                                 if dist < min_dist: min_dist = dist
                             if min_dist == 0:
-                                score += 500
+                                score += config.zero_gap_bonus
                             else:
-                                score -= (min_dist * 100)
+                                score -= (min_dist * config.gap_penalty_per_slot)
                                 
+                        # [DYNAMIC] Cross-Scheduling Parallel Groups
                         if group_name is not None:
                             parallel_bonus = 0
                             for w_slot in time_slots[start_idx : start_idx + duration]:
@@ -545,7 +569,7 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
                                 groups_here = constraints.batch_slot_groups.get(check_key, set())
                                 sibling_groups = [g for g in groups_here if g is not None and g != group_name]
                                 if sibling_groups:
-                                    parallel_bonus += 10000  
+                                    parallel_bonus += config.parallel_bonus  
                             score += parallel_bonus
                             
                         return score
@@ -574,9 +598,6 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
                             scheduled_count += 1
 
             if not group_assigned:
-                # =========================================================================
-                # [NEW] DYNAMIC FALLBACK: If big room is busy, intercept drop and split dynamically!
-                # =========================================================================
                 if is_lab and group_name is None:
                     all_lab_rooms = get_valid_rooms_for_course(course, all_active_rooms, True, None)
                     smaller_rooms = [r for r in all_lab_rooms if r.capacity < course.student_count]
@@ -591,7 +612,6 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
                     if num_groups > 1:
                         new_req_capacity = math.ceil(course.student_count / num_groups)
                         
-                        # Dynamically increase limits to accommodate the extra groups
                         if course.teacher:
                             constraints.teacher_limits[course.teacher.id] = constraints.teacher_limits.get(course.teacher.id, 4) + (duration * (num_groups - 1))
                         batch_key = (course.department.id, course.semester.id)
@@ -601,12 +621,12 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
                         for grp in new_groups:
                             sorted_sessions.append({
                                 'course': course, 'group': grp, 'duration': duration, 
-                                'priority_score': session['priority_score'] + 5000, 
+                                'priority_score': session['priority_score'] + config.parallel_bonus, 
                                 'is_lab': True, 'req_capacity': new_req_capacity
                             })
                         
                         total_required += (num_groups - 1)
-                        continue # Skip the drop! We will schedule the pieces!
+                        continue 
 
                 grp_str = f" ({group_name})" if group_name else ""
                 dropped_sessions.append(f"Dropped: {course.course_name}{grp_str} (Global conflict)")
