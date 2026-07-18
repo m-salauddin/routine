@@ -170,6 +170,8 @@ class Course(TimeStampedModel):
 # ==============================================================================
 # 4. ROUTINE & CONSTRAINT MODELS
 # ==============================================================================
+from django.core.exceptions import ValidationError
+from django.db.models import Q
 
 class RoutineEntry(TimeStampedModel):
     day = models.ForeignKey(Day, on_delete=models.CASCADE)
@@ -181,11 +183,9 @@ class RoutineEntry(TimeStampedModel):
     is_cancelled = models.BooleanField(default=False)
     cancel_message = models.TextField(null=True, blank=True)
     
-    #  Admin Pre-Assigned Flag ---
     is_fixed = models.BooleanField(default=False, help_text="True if this class is pre-assigned by Admin")
 
     class Meta:
-        #  'group_name' to allow parallel lab groups for the same course
         unique_together = (
             ('day', 'time_slot', 'room'), 
             ('day', 'time_slot', 'course', 'group_name')
@@ -194,7 +194,56 @@ class RoutineEntry(TimeStampedModel):
     def __str__(self):
         fixed_mark = "[FIXED] " if self.is_fixed else ""
         return f"{fixed_mark}{self.day.name} | {self.time_slot} | {self.course.course_code} | Room: {self.room}"
-    
+
+    def clean(self):
+        super().clean()
+
+        if not self.course_id or not self.day_id or not self.time_slot_id:
+            return
+
+        # ওই দিনের এবং ওই স্লটের আগের সব ক্লাস ফিল্টার করা হচ্ছে (নিজে ছাড়া)
+        qs = RoutineEntry.objects.filter(day=self.day, time_slot=self.time_slot)
+        if self.pk:
+            qs = qs.exclude(pk=self.pk)
+
+        # 🚨 ১. হার্ড টিচার কনস্ট্রেইন্ট (Strict Teacher Lock)
+        # একজন টিচার একই সময়ে কখনোই দুই রুমে থাকতে পারবেন না (তা সে একই কোর্সের গ্রুপ ল্যাব হলেও)
+        if self.course.teacher:
+            teacher_clash = qs.filter(course__teacher=self.course.teacher)
+            if teacher_clash.exists():
+                clashed_class = teacher_clash.first()
+                raise ValidationError({
+                    'course': f"Teacher {self.course.teacher} is already scheduled for '{clashed_class.course.course_code}' in Room {clashed_class.room} at this time."
+                })
+
+        # 🚨 ২. হার্ড ব্যাচ এবং গ্রুপ কনস্ট্রেইন্ট (Strict Batch & Group Lock)
+        # একই সেমিস্টার ও ডিপার্টমেন্টের স্টুডেন্টদের ক্লাস ওভারল্যাপ চেক
+        batch_clash = qs.filter(
+            course__department=self.course.department,
+            course__semester=self.course.semester
+        )
+        
+        for entry in batch_clash:
+            # ক. যদি দুই ক্লাসের কোনোটিতেই গ্রুপ না থাকে (দুটিই কম্বাইন্ড ক্লাস)
+            if not self.group_name and not entry.group_name:
+                raise ValidationError(f"This batch already has a combined class ({entry.course.course_code}) at this time.")
+            
+            # খ. নতুন ক্লাসটি কম্বাইন্ড, কিন্তু ওই সময়ে অলরেডি একটি গ্রুপের ক্লাস আছে
+            if not self.group_name and entry.group_name:
+                raise ValidationError(f"Cannot schedule a combined class. This batch already has a class for {entry.group_name} ({entry.course.course_code}) at this time.")
+            
+            # গ. ওই সময়ে একটি কম্বাইন্ড ক্লাস আছে, কিন্তু এখন একটি গ্রুপের ক্লাস ঢোকানোর চেষ্টা করা হচ্ছে
+            if self.group_name and not entry.group_name:
+                raise ValidationError(f"Cannot schedule for {self.group_name}. This batch already has a combined class ({entry.course.course_code}) at this time.")
+                
+            # ঘ. দুটি ক্লাসেরই গ্রুপ আছে, কিন্তু গ্রুপ দুটি একই (যেমন: Group A এর একই সময়ে দুই ল্যাব)
+            if self.group_name and entry.group_name and self.group_name == entry.group_name:
+                raise ValidationError(f"{self.group_name} already has a class ({entry.course.course_code}) at this time.")
+
+    def save(self, *args, **kwargs):
+        # সেভ করার আগে বাধ্যতামূলকভাবে clean() মেথড কল হবে
+        self.clean()
+        super().save(*args, **kwargs)
 
 # --- model to store fixed class schedules (pre-assigned by admin) ---
 class FixedClassSchedule(TimeStampedModel):
