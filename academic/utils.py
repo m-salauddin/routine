@@ -1,463 +1,687 @@
 # academic/utils.py
 import random
 import math
-from django.db import transaction, IntegrityError
-from django.core.exceptions import ValidationError
+from django.db import transaction
 from .models import (
-    Day, Course, TimeSlot, RoutineEntry, Room,
+    Day, Course, TimeSlot, RoutineEntry, Room, 
     SystemSetting, RoutineBackup, BatchTimeConstraint, FixedClassSchedule,
     AlgorithmConfig
 )
 
-MAX_CONTINUOUS = 4
-
-
-# ==============================================================================
-# CONSTRAINT TRACKER
-# ==============================================================================
-# Batch model (sections):
-#   * group_name = None  -> the WHOLE batch (a theory class blocks every section)
-#   * group_name = "Group A"/"Group B"/... -> ONE section of the batch
-#   * Two DIFFERENT sections may run at the SAME time (parallel labs), because they
-#     are different students, different rooms and different teachers.
-#   * The SAME section can never be in two places at once.
-#   * A teacher can never be in two places at once (STRICT — no bypass).
-# ==============================================================================
 class ScheduleConstraint:
     def __init__(self, days, time_slots, batch_constraints_dict, teacher_totals, batch_totals):
-        self.teacher_occupied = set()        # (day, slot, teacher)  -- STRICT single occupancy
-        self.room_occupied = set()           # (day, slot, room)
-        self.teacher_batch_interaction = {}  # (day, teacher, dept, sem) -> course_id
-        self.batch_slot_groups = {}          # (day, slot, dept, sem) -> {group_name,...}
+        self.teacher_occupied = {} 
+        self.room_occupied = set()
+        self.course_daily_tracker = set()
+        self.teacher_batch_interaction = {}
+        self.batch_slot_groups = {}  
 
         self.day_loads = {day.id: 0 for day in days}
         self.teacher_daily_count = {}
-        self.batch_daily_count = {}          # (dept, sem, day, group) -> hours
-        self.room_usage_count = {}
-
+        self.batch_daily_count = {}
+        
+        self.room_usage_count = {} 
+        
         self.batch_constraints = batch_constraints_dict
-        self.lunch_indices = {i for i, s in enumerate(time_slots) if s.is_lunch_break}
-        self.total_days = max(1, len(days))
+        self.lunch_indices = {idx for idx, slot in enumerate(time_slots) if slot.is_lunch_break}
+        
+        total_days = max(1, len(days))
+        
+        self.teacher_limits = {
+            tid: math.ceil(total / total_days) + 2 
+            for tid, total in teacher_totals.items()
+        }
+        # Strict Load Balancing limit
+        self.batch_limits = {
+            bid: math.ceil(total / total_days) + 1  
+            for bid, total in batch_totals.items()
+        }
 
-        self.teacher_limits = {tid: math.ceil(t / self.total_days) + 2 for tid, t in teacher_totals.items()}
-        self.batch_limits = {bid: math.ceil(t / self.total_days) + 2 for bid, t in batch_totals.items()}
-
-        self.slot_index_map = {s.id: i for i, s in enumerate(time_slots)}
-        self.teacher_schedule_map = {}
-        self.batch_schedule_map = {}
+        self.slot_index_map = {slot.id: idx for idx, slot in enumerate(time_slots)}
+        self.teacher_schedule_map = {} 
+        self.batch_schedule_map = {}   
 
     def get_batch_day_load(self, dept_id, sem_id, day_id, group_name=None):
-        common = self.batch_daily_count.get((dept_id, sem_id, day_id, None), 0)
+        common_load = self.batch_daily_count.get((dept_id, sem_id, day_id, None), 0)
         if group_name:
-            return common + self.batch_daily_count.get((dept_id, sem_id, day_id, group_name), 0)
-        mx = 0
+            group_load = self.batch_daily_count.get((dept_id, sem_id, day_id, group_name), 0)
+            return common_load + group_load
+            
+        max_group_load = 0
         for k, v in self.batch_daily_count.items():
             if k[0] == dept_id and k[1] == sem_id and k[2] == day_id and k[3] is not None:
-                mx = max(mx, v)
-        return common + mx
+                if v > max_group_load:
+                    max_group_load = v
+        return common_load + max_group_load
 
-    def teacher_day_load(self, teacher_id, day_id):
-        return self.teacher_daily_count.get((teacher_id, day_id), 0)
-
-    def continuous_run(self, day_id, start_idx, duration, course, group_name):
-        def run(occ):
-            l, li = 0, start_idx - 1
-            while li in occ and li not in self.lunch_indices:
-                l += 1; li -= 1
-            r, ri = 0, start_idx + duration
-            while ri in occ and ri not in self.lunch_indices:
-                r += 1; ri += 1
-            return l + duration + r
-        bg = self.batch_schedule_map.get((day_id, course.department.id, course.semester.id, group_name), set())
-        ba = self.batch_schedule_map.get((day_id, course.department.id, course.semester.id, None), set())
-        run_val = run(bg | ba)
+    def can_schedule_daily(self, day_id, course, duration, group_name=None):
         if course.teacher:
-            run_val = max(run_val, run(self.teacher_schedule_map.get((day_id, course.teacher.id), set())))
-        return run_val
+            t_limit = self.teacher_limits.get(course.teacher.id, 4)
+            current_t_load = self.teacher_daily_count.get((course.teacher.id, day_id), 0)
+            if current_t_load + duration > t_limit:
+                return False
+                
+        dept_id, sem_id = course.department.id, course.semester.id
+        b_limit = self.batch_limits.get((dept_id, sem_id), 6)
+        
+        current_b_load = self.get_batch_day_load(dept_id, sem_id, day_id, group_name)
+        if current_b_load + duration > b_limit:
+            return False
+            
+        return True
 
-    # -------- HARD conflict (physically impossible if True) --------
+    def can_schedule_continuous(self, day_id, start_idx, duration, course, group_name=None):
+        MAX_CONTINUOUS = 4
+
+        b_map_key_grp = (day_id, course.department.id, course.semester.id, group_name)
+        b_map_key_all = (day_id, course.department.id, course.semester.id, None)
+        
+        batch_occupied = self.batch_schedule_map.get(b_map_key_grp, set()).union(
+                         self.batch_schedule_map.get(b_map_key_all, set()))
+
+        left_idx = start_idx - 1
+        left_count = 0
+        while left_idx in batch_occupied and left_idx not in self.lunch_indices:
+            left_count += 1
+            left_idx -= 1
+
+        right_idx = start_idx + duration
+        right_count = 0
+        while right_idx in batch_occupied and right_idx not in self.lunch_indices:
+            right_count += 1
+            right_idx += 1
+
+        if left_count + duration + right_count > MAX_CONTINUOUS:
+            return False
+
+        if course.teacher:
+            teacher_key = (day_id, course.teacher.id)
+            teacher_occupied = self.teacher_schedule_map.get(teacher_key, set())
+
+            left_idx = start_idx - 1
+            left_count = 0
+            while left_idx in teacher_occupied and left_idx not in self.lunch_indices:
+                left_count += 1
+                left_idx -= 1
+
+            right_idx = start_idx + duration
+            right_count = 0
+            while right_idx in teacher_occupied and right_idx not in self.lunch_indices:
+                right_count += 1
+                right_idx += 1
+
+            if left_count + duration + right_count > MAX_CONTINUOUS:
+                return False
+
+        return True
+
     def is_conflict(self, day, slot, course, room, group_name=None, is_fixed=False):
         day_id = day.id
-        ctype = self.batch_constraints.get((course.department.id, course.semester.id, day_id, slot.id))
-        if ctype == 'CLASS_OFF':
+        constraint_type = self.batch_constraints.get((course.department.id, course.semester.id, day_id, slot.id))
+        
+        if constraint_type == 'CLASS_OFF':
             return True
-        if slot.is_lunch_break and ctype != 'FORCE_ALLOW_LUNCH_CLASS':
+        if slot.is_lunch_break and constraint_type != 'FORCE_ALLOW_LUNCH_CLASS':
             return True
-
-        # teacher: strict single occupancy
-        if course.teacher and (day_id, slot.id, course.teacher.id) in self.teacher_occupied:
-            return True
-        # room: single occupancy
+            
+        if course.teacher:
+            occupied_by_course = self.teacher_occupied.get((day_id, slot.id, course.teacher.id))
+            if occupied_by_course is not None:
+                is_lab = course.course_type and 'lab' in course.course_type.name.lower()
+                if not (is_lab and occupied_by_course == course.id):
+                    return True
+                    
         if room and (day_id, slot.id, room.id) in self.room_occupied:
             return True
+            
+        b_key = (day_id, slot.id, course.department.id, course.semester.id)
+        if b_key in self.batch_slot_groups:
+            occupied_groups = self.batch_slot_groups[b_key]
+            if None in occupied_groups:
+                return True 
+            if group_name is None and len(occupied_groups) > 0:
+                return True  
+            if group_name in occupied_groups:
+                return True  
 
-        # batch / section logic (this is what allows two DIFFERENT sections in parallel)
-        groups_here = self.batch_slot_groups.get((day_id, slot.id, course.department.id, course.semester.id))
-        if groups_here:
-            if None in groups_here:
-                return True                      # whole-batch (theory) already here -> blocks everyone
-            if group_name is None:
-                return True                      # can't add a whole-batch class while sections are running
-            if group_name in groups_here:
-                return True                      # THIS section already busy here
+        is_lab = course.course_type and 'lab' in course.course_type.name.lower()
+        if not is_fixed and not is_lab and (course.id, group_name, day_id) in self.course_daily_tracker:
+            return True
 
-        # one teacher teaches only one course to a given batch
         if course.teacher:
-            tb = self.teacher_batch_interaction.get((day_id, course.teacher.id, course.department.id, course.semester.id))
-            if tb is not None and tb != course.id:
+            tb_key = (day_id, course.teacher.id, course.department.id, course.semester.id)
+            if tb_key in self.teacher_batch_interaction and self.teacher_batch_interaction[tb_key] != course.id:
                 return True
+
         return False
 
     def assign(self, day, slot, course, room, group_name=None):
         day_id = day.id
-        idx = self.slot_index_map[slot.id]
+        slot_idx = self.slot_index_map[slot.id]
+
         if course.teacher:
-            if (day_id, slot.id, course.teacher.id) not in self.teacher_occupied:
+            t_key = (day_id, slot.id, course.teacher.id)
+            
+            if t_key not in self.teacher_occupied:
                 self.teacher_daily_count[(course.teacher.id, day_id)] = self.teacher_daily_count.get((course.teacher.id, day_id), 0) + 1
-            self.teacher_occupied.add((day_id, slot.id, course.teacher.id))
+            
+            self.teacher_occupied[t_key] = course.id
             self.teacher_batch_interaction[(day_id, course.teacher.id, course.department.id, course.semester.id)] = course.id
-            self.teacher_schedule_map.setdefault((day_id, course.teacher.id), set()).add(idx)
+            
+            sched_key = (day_id, course.teacher.id)
+            if sched_key not in self.teacher_schedule_map:
+                self.teacher_schedule_map[sched_key] = set()
+            self.teacher_schedule_map[sched_key].add(slot_idx)
+        
         if room:
             self.room_occupied.add((day_id, slot.id, room.id))
             self.room_usage_count[room.id] = self.room_usage_count.get(room.id, 0) + 1
-        self.batch_slot_groups.setdefault((day_id, slot.id, course.department.id, course.semester.id), set()).add(group_name)
+        
+        b_key_groups = (day_id, slot.id, course.department.id, course.semester.id)
+        if b_key_groups not in self.batch_slot_groups:
+            self.batch_slot_groups[b_key_groups] = set()
+        self.batch_slot_groups[b_key_groups].add(group_name)
+
+        self.course_daily_tracker.add((course.id, group_name, day_id))
         self.day_loads[day_id] += 1
-        self.batch_daily_count[(course.department.id, course.semester.id, day_id, group_name)] = \
-            self.batch_daily_count.get((course.department.id, course.semester.id, day_id, group_name), 0) + 1
-        self.batch_schedule_map.setdefault((day_id, course.department.id, course.semester.id, group_name), set()).add(idx)
+        
+        b_key = (course.department.id, course.semester.id, day_id, group_name)
+        self.batch_daily_count[b_key] = self.batch_daily_count.get(b_key, 0) + 1
 
+        b_map_key = (day_id, course.department.id, course.semester.id, group_name)
+        if b_map_key not in self.batch_schedule_map:
+            self.batch_schedule_map[b_map_key] = set()
+        self.batch_schedule_map[b_map_key].add(slot_idx)
 
-# ==============================================================================
-# ROOM HELPER
-# ==============================================================================
-def matching_rooms(course, all_active_rooms, required_capacity=None):
+def get_valid_rooms_for_course(course, all_active_rooms, is_lab, required_capacity=None):
     if course.fixed_room and course.fixed_room.is_active:
         return [course.fixed_room]
-    base = [r for r in all_active_rooms
-            if r.room_type_id == course.course_type_id
-            and (not course.course_sub_type_id or r.room_sub_type_id == course.course_sub_type_id)]
-    dept = course.preferred_room_department or course.offering_department or course.department
-    rooms = [r for r in base if r.department_id == dept.id]
-    if required_capacity and required_capacity > 0:
-        fit = [r for r in rooms if r.capacity >= required_capacity]
-        rooms = fit if fit else rooms          # if nothing fits, keep all (avoid a false drop)
-    return rooms
 
+    base_matching_rooms = [
+        r for r in all_active_rooms
+        if r.room_type_id == course.course_type_id 
+        and (not course.course_sub_type_id or r.room_sub_type_id == course.course_sub_type_id)
+    ]
 
-def is_lab_course(c):
-    return bool(c.course_type and 'lab' in c.course_type.name.lower())
+    dept_to_search = course.preferred_room_department or course.offering_department or course.department
+    valid_rooms = [r for r in base_matching_rooms if r.department_id == dept_to_search.id]
 
+    if not valid_rooms:
+        return []
 
-# ==============================================================================
-# SECTION PLANNER  — decide how many sections (A/B/...) a batch is split into
-# ==============================================================================
-def plan_sections(courses, all_active_rooms):
-    """Return {(dept_id, sem_id): num_sections}. A batch is split only when its
-    labs are too big for the available lab rooms."""
-    sections = {}
-    batches = {}
-    for c in courses:
-        batches.setdefault((c.department.id, c.semester.id), []).append(c)
+    if required_capacity is None:
+        valid_rooms.sort(key=lambda x: x.capacity, reverse=True)
+        return valid_rooms
+        
+    rooms_fitting = [r for r in valid_rooms if r.capacity >= required_capacity]
+    rooms_fitting.sort(key=lambda x: x.capacity) 
 
-    for bkey, blist in batches.items():
-        labs = [c for c in blist if is_lab_course(c)]
-        if not labs:
-            sections[bkey] = 1
-            continue
-        batch_size = max((c.student_count or 0) for c in blist)
-        # biggest lab room available to this batch's labs
-        best_cap = 0
-        for c in labs:
-            for r in matching_rooms(c, all_active_rooms):
-                best_cap = max(best_cap, r.capacity)
-        if batch_size > 0 and best_cap > 0 and batch_size > best_cap:
-            sections[bkey] = math.ceil(batch_size / best_cap)
+    return rooms_fitting
+
+def prepare_prioritized_sessions(courses, all_active_rooms, fixed_counts=None, course_fixed_groups=None):
+    if fixed_counts is None:
+        fixed_counts = {}
+    if course_fixed_groups is None:
+        course_fixed_groups = {}
+        
+    all_sessions = []
+    for course in courses:
+        is_lab_course = course.course_type and 'lab' in course.course_type.name.lower()
+        valid_rooms = get_valid_rooms_for_course(course, all_active_rooms, is_lab_course, None)
+        
+        groups = [None]
+        req_capacity = course.student_count
+        
+        if is_lab_course:
+            if course.id in course_fixed_groups and None in course_fixed_groups[course.id]:
+                groups = [None]
+            elif valid_rooms and valid_rooms[0].capacity < course.student_count:
+                num_groups = math.ceil(course.student_count / valid_rooms[0].capacity)
+                groups = [f"Group {chr(65+i)}" for i in range(num_groups)]
+                req_capacity = math.ceil(course.student_count / num_groups)
+            
+        total_credits = course.credits if course.credits > 0 else 1
+        fixed_bonus = 1000 if course.fixed_room else 0
+        
+        anchor_bonus = 0
+        if not is_lab_course:
+            anchor_bonus = 20000  
         else:
-            sections[bkey] = 1
-    return sections
+            anchor_bonus = 5000   
 
-
-# ==============================================================================
-# SCORING  (compact week + REWARD parallel sections running together)
-# ==============================================================================
-def window_score(constraints, config, course, day, start_idx, duration, group_name, total_slots, window):
-    score = 0
-    bg = constraints.batch_schedule_map.get((day.id, course.department.id, course.semester.id, group_name), set())
-    ba = constraints.batch_schedule_map.get((day.id, course.department.id, course.semester.id, None), set())
-    occupied = bg | ba
-
-    load = constraints.get_batch_day_load(course.department.id, course.semester.id, day.id, group_name)
-    score -= load * config.day_load_penalty_multiplier
-    if course.teacher:
-        score -= constraints.teacher_day_load(course.teacher.id, day.id) * (config.day_load_penalty_multiplier // 2)
-
-    if occupied:
-        gaps = []
-        for o in occupied:
-            if o < start_idx:
-                g = sum(1 for s in range(o + 1, start_idx) if s not in constraints.lunch_indices)
+        for grp in groups:
+            remaining_credits = course.credits - fixed_counts.get((course.id, grp), 0)
+            if remaining_credits <= 0:
+                continue  
+                
+            credits_filled = fixed_counts.get((course.id, grp), 0)
+            
+            if is_lab_course:
+                temp_rem = remaining_credits
+                while temp_rem >= 2:
+                    credits_filled += 2
+                    all_sessions.append({
+                        'course': course, 'group': grp, 'duration': 2, 
+                        'priority_score': (credits_filled / total_credits) + fixed_bonus + anchor_bonus, 
+                        'is_lab': True, 'req_capacity': req_capacity
+                    })
+                    temp_rem -= 2
+                if temp_rem > 0:
+                    credits_filled += 1
+                    all_sessions.append({
+                        'course': course, 'group': grp, 'duration': 1, 
+                        'priority_score': (credits_filled / total_credits) + fixed_bonus + anchor_bonus, 
+                        'is_lab': True, 'req_capacity': req_capacity
+                    })
             else:
-                g = sum(1 for s in range(start_idx + duration, o) if s not in constraints.lunch_indices)
-            gaps.append(g)
-        mn = min(gaps)
-        score += config.zero_gap_bonus if mn == 0 else -mn * config.gap_penalty_per_slot
-    else:
-        score += config.zero_gap_bonus // 2
+                for _ in range(remaining_credits):
+                    credits_filled += 1
+                    all_sessions.append({
+                        'course': course, 'group': grp, 'duration': 1, 
+                        'priority_score': (credits_filled / total_credits) + fixed_bonus + anchor_bonus, 
+                        'is_lab': False, 'req_capacity': req_capacity
+                    })
 
-    for w in range(start_idx, start_idx + duration):
-        if w == 0 or w == total_slots - 1:
-            score -= config.edge_slot_penalty
-        elif w == 1 or w == total_slots - 2:
-            score -= config.edge_slot_penalty // 2
-        else:
-            score += config.center_gravity_bonus
+    random.shuffle(all_sessions)
+    all_sessions.sort(key=lambda x: (
+        x['priority_score'], 
+        -x['duration'],
+        x['course'].department.id,
+        x['course'].semester.id if x['course'].semester else 0
+    ), reverse=True)
+    
+    return all_sessions
 
-    if constraints.continuous_run(day.id, start_idx, duration, course, group_name) >= MAX_CONTINUOUS:
-        score -= config.continuous_class_penalty
-
-    # *** THE KEY: reward running this section in PARALLEL with ANOTHER section ***
-    if group_name is not None:
-        parallel_hits = 0
-        for w_slot in window:
-            grps = constraints.batch_slot_groups.get((day.id, w_slot.id, course.department.id, course.semester.id), set())
-            if any(g is not None and g != group_name for g in grps):
-                parallel_hits += 1
-        score += parallel_hits * config.parallel_bonus
-
-    score -= start_idx
-    return score
-
-
-# ==============================================================================
-# PLACE ONE SESSION  (a section-lab block, or a whole-batch theory/lab block)
-# ==============================================================================
-def place_session(constraints, config, course, duration, group_name, req_capacity,
-                  days, time_slots, entries, relax=False):
-    total_slots = len(time_slots)
-    rooms = matching_rooms(course, all_active_rooms=course._all_rooms, required_capacity=req_capacity)
-    if not rooms:
-        return False
-    best = None
-    for day in days:
-        if not relax:
-            b_limit = constraints.batch_limits.get((course.department.id, course.semester.id), 6)
-            if constraints.get_batch_day_load(course.department.id, course.semester.id, day.id, group_name) + duration > b_limit:
-                continue
-            if course.teacher:
-                t_limit = constraints.teacher_limits.get(course.teacher.id, 6)
-                if constraints.teacher_day_load(course.teacher.id, day.id) + duration > t_limit:
-                    continue
-        for i in range(total_slots - duration + 1):
-            window = time_slots[i:i + duration]
-            if any(w.is_lunch_break for w in window):
-                continue
-            if not relax and constraints.continuous_run(day.id, i, duration, course, group_name) > MAX_CONTINUOUS:
-                continue
-            # pick a free room (least used, smallest that fits)
-            room = None
-            for r in sorted(rooms, key=lambda r: (constraints.room_usage_count.get(r.id, 0), r.capacity)):
-                if all(not constraints.is_conflict(day, w, course, r, group_name) for w in window):
-                    room = r
-                    break
-            if not room:
-                continue
-            sc = window_score(constraints, config, course, day, i, duration, group_name, total_slots, window)
-            if best is None or sc > best[0]:
-                best = (sc, day, window, room)
-    if best is None:
-        return False
-    _, day, window, room = best
-    for slot in window:
-        constraints.assign(day, slot, course, room, group_name)
-        entries.append(RoutineEntry(day=day, time_slot=slot, course=course, room=room, group_name=group_name))
-    return True
-
-
-# ==============================================================================
-# MAIN GENERATOR
-# ==============================================================================
 def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=False):
     setting = SystemSetting.objects.first()
     if setting and setting.is_routine_locked:
         return {"status": "Locked", "message": "System is locked. Cannot generate routine."}
 
-    cfg = AlgorithmConfig.objects.first()
-
+    config_obj = AlgorithmConfig.objects.first()
     class DefaultConfig:
-        parallel_bonus = 8000          # strongly pull two sections into the same slot
-        edge_slot_penalty = 300
-        zero_gap_bonus = 500
-        gap_penalty_per_slot = 200
+        parallel_bonus = 50000
+        edge_slot_penalty = 2000
+        zero_gap_bonus = 1000
+        gap_penalty_per_slot = 500
         center_gravity_bonus = 50
-        continuous_class_penalty = 150
-        day_load_penalty_multiplier = 100
-    config = cfg if cfg else DefaultConfig()
+        continuous_class_penalty = 100
+        day_load_penalty_multiplier = 150
+        
+    config = config_obj if config_obj else DefaultConfig()
 
     with transaction.atomic():
-        base = Course.objects.select_related(
-            'teacher', 'department', 'semester', 'course_type', 'course_sub_type',
+        base_courses = Course.objects.select_related(
+            'teacher', 'department', 'semester', 'course_type', 'course_sub_type', 
             'fixed_room', 'preferred_room_department', 'offering_department'
         ).filter(department_id=department_id, is_active=True)
 
         if semester_id:
-            courses = list(base.filter(semester_id=semester_id))
-            old = RoutineEntry.objects.filter(course__department_id=department_id, course__semester_id=semester_id)
+            courses_to_schedule = list(base_courses.filter(semester_id=semester_id))
+            old_routines = RoutineEntry.objects.filter(course__department_id=department_id, course__semester_id=semester_id)
             fixed_schedules = FixedClassSchedule.objects.filter(course__department_id=department_id, course__semester_id=semester_id)
         else:
-            courses = list(base)
-            old = RoutineEntry.objects.filter(course__department_id=department_id)
+            courses_to_schedule = list(base_courses)
+            old_routines = RoutineEntry.objects.filter(course__department_id=department_id)
             fixed_schedules = FixedClassSchedule.objects.filter(course__department_id=department_id)
 
-        if old.exists():
-            RoutineBackup.objects.create(department_id=department_id, backup_data=[{
-                'day_id': e.day_id, 'time_slot_id': e.time_slot_id, 'course_id': e.course_id,
-                'room_id': e.room_id, 'group_name': e.group_name, 'is_fixed': getattr(e, 'is_fixed', False)
-            } for e in old])
-        old.delete()
+        if old_routines.exists():
+            backup_list = [{
+                'day_id': e.day_id, 'time_slot_id': e.time_slot_id, 
+                'course_id': e.course_id, 'room_id': e.room_id, 
+                'group_name': e.group_name, 'is_fixed': getattr(e, 'is_fixed', False)
+            } for e in old_routines]
+            RoutineBackup.objects.create(department_id=department_id, backup_data=backup_list)
+
+        old_routines.delete()
 
         days = list(Day.objects.all().order_by('order'))
         time_slots = list(TimeSlot.objects.all().order_by('start_time'))
-        all_rooms = list(Room.objects.filter(is_active=True))
-        for c in courses:
-            c._all_rooms = all_rooms                      # attach for the room helper
+        total_slots = len(time_slots)
+        all_active_rooms = list(Room.objects.filter(is_active=True))
 
-        batch_constraints = {}
-        for c in BatchTimeConstraint.objects.filter(is_active=True):
+        constraints_qs = BatchTimeConstraint.objects.filter(is_active=True)
+        batch_constraints_dict = {}
+        for c in constraints_qs:
             key = (c.department_id, c.semester_id, c.day_id, c.time_slot_id)
-            if batch_constraints.get(key) == 'CLASS_OFF':
+            if key in batch_constraints_dict and batch_constraints_dict[key] == 'CLASS_OFF':
                 continue
-            batch_constraints[key] = c.constraint_type
+            batch_constraints_dict[key] = c.constraint_type
 
-        # ---- decide sections per batch ----
-        section_count = plan_sections(courses, all_rooms)
+        course_fixed_groups = {}
+        for fs in fixed_schedules:
+            if fs.course_id not in course_fixed_groups:
+                course_fixed_groups[fs.course_id] = set()
+            course_fixed_groups[fs.course_id].add(fs.group_name)
 
-        # ---- daily-load estimates ----
-        teacher_totals, batch_totals = {}, {}
-        for c in courses:
-            ns = section_count.get((c.department.id, c.semester.id), 1)
-            reps = ns if is_lab_course(c) else 1          # a lab teacher repeats for each section
+        teacher_totals = {}
+        batch_totals = {}
+        
+        for c in courses_to_schedule:
+            is_lab = c.course_type and 'lab' in c.course_type.name.lower()
+            valid_rooms = get_valid_rooms_for_course(c, all_active_rooms, is_lab, None)
+            
+            num_groups = 1
+            if is_lab:
+                if c.id in course_fixed_groups and None in course_fixed_groups[c.id]:
+                    num_groups = 1
+                elif valid_rooms and valid_rooms[0].capacity < c.student_count:
+                    num_groups = math.ceil(c.student_count / valid_rooms[0].capacity)
+                
+            total_teacher_credits = c.credits * num_groups
             if c.teacher:
-                teacher_totals[c.teacher.id] = teacher_totals.get(c.teacher.id, 0) + c.credits * reps
-            bk = (c.department.id, c.semester.id)
-            batch_totals[bk] = batch_totals.get(bk, 0) + c.credits   # a single student attends each course once
+                teacher_totals[c.teacher.id] = teacher_totals.get(c.teacher.id, 0) + total_teacher_credits
+            
+            batch_key = (c.department.id, c.semester.id)
+            batch_totals[batch_key] = batch_totals.get(batch_key, 0) + c.credits
 
-        constraints = ScheduleConstraint(days, time_slots, batch_constraints, teacher_totals, batch_totals)
+        constraints = ScheduleConstraint(days, time_slots, batch_constraints_dict, teacher_totals, batch_totals)
 
-        for r in RoutineEntry.objects.select_related(
-                'day', 'time_slot', 'course', 'course__teacher',
-                'course__department', 'course__semester', 'room').filter(is_active=True):
+        existing_routines = RoutineEntry.objects.select_related('day', 'time_slot', 'course', 'course__teacher', 'course__department', 'course__semester', 'room').filter(is_active=True)
+        for r in existing_routines:
             constraints.assign(r.day, r.time_slot, r.course, r.room, r.group_name)
 
-        entries, dropped = [], []
-        scheduled = 0
-        total_required = 0
-
-        # ---------- STEP 1: fixed classes ----------
+        fixed_routines_to_insert = []
+        fixed_counts = {}
+        scheduled_count = 0
+        dropped_sessions = []
+        routines_to_create = []
+        
         for fs in fixed_schedules:
-            course, day, slot, grp = fs.course, fs.day, fs.time_slot, fs.group_name
-            course._all_rooms = all_rooms
-            rooms = matching_rooms(course, all_rooms)
-            room = fs.room
-            if not (room and not constraints.is_conflict(day, slot, course, room, grp, is_fixed=True)):
-                room = None
-                for r in sorted(rooms, key=lambda r: (constraints.room_usage_count.get(r.id, 0), r.capacity)):
-                    if not constraints.is_conflict(day, slot, course, r, grp, is_fixed=True):
-                        room = r; break
-            total_required += 1
-            if room:
-                constraints.assign(day, slot, course, room, grp)
-                entries.append(RoutineEntry(day=day, time_slot=slot, course=course, room=room, group_name=grp, is_fixed=True))
-                scheduled += 1
-            else:
-                dropped.append(f"Dropped Fixed: {course.course_code} at {day.name} {slot.start_time}")
-
-        # ---------- STEP 2: build sessions ----------
-        # labs first (they need parallel partners); each lab is repeated once per section
-        lab_sessions, theory_sessions = [], []
-        for c in courses:
-            bkey = (c.department.id, c.semester.id)
-            ns = section_count.get(bkey, 1)
-            if is_lab_course(c):
-                if ns > 1:
-                    per_sec = math.ceil((c.student_count or 0) / ns) if (c.student_count or 0) > 0 else 0
-                    groups = [f"Group {chr(65 + k)}" for k in range(ns)]
+            course = fs.course
+            day = fs.day
+            slot = fs.time_slot
+            is_lab = course.course_type and 'lab' in course.course_type.name.lower()
+            
+            valid_rooms = get_valid_rooms_for_course(course, all_active_rooms, is_lab, None)
+            groups_to_schedule = [fs.group_name]
+                
+            for grp in groups_to_schedule:
+                assigned_room = fs.room
+                if assigned_room and constraints.is_conflict(day, slot, course, assigned_room, grp, is_fixed=True):
+                    assigned_room = None
+                    
+                if not assigned_room:
+                    valid_rooms.sort(key=lambda r: (r.capacity, constraints.room_usage_count.get(r.id, 0)))
+                    for r in valid_rooms:
+                        if not constraints.is_conflict(day, slot, course, r, grp, is_fixed=True):
+                            assigned_room = r
+                            break
+                            
+                if assigned_room:
+                    constraints.assign(day, slot, course, assigned_room, grp)
+                    fixed_routines_to_insert.append(RoutineEntry(
+                        day=day, time_slot=slot, course=course, room=assigned_room, group_name=grp, is_fixed=True
+                    ))
+                    fixed_counts[(course.id, grp)] = fixed_counts.get((course.id, grp), 0) + 1
+                    scheduled_count += 1
                 else:
-                    per_sec, groups = (c.student_count or 0), [None]
-                for grp in groups:
-                    rem = c.credits
-                    while rem >= 2:
-                        lab_sessions.append((c, 2, grp, per_sec)); rem -= 2
-                    if rem > 0:
-                        lab_sessions.append((c, 1, grp, per_sec))
-            else:
-                for _ in range(c.credits):
-                    theory_sessions.append((c, 1, None, c.student_count or 0))
+                    grp_str = f" ({grp})" if grp else ""
+                    dropped_sessions.append(f"Dropped Fixed: {course.course_code}{grp_str} at {day.name} {slot.start_time} (No available room)")
 
-        random.shuffle(lab_sessions); random.shuffle(theory_sessions)
-        total_required += len(lab_sessions) + len(theory_sessions)
+        if fixed_routines_to_insert:
+            RoutineEntry.objects.bulk_create(fixed_routines_to_insert)
 
-        # ---------- STEP 3: place labs (parallel sections), then theories ----------
-        def place_all(queue):
-            nonlocal scheduled
-            for course, duration, grp, cap in queue:
-                if not matching_rooms(course, all_rooms):
-                    dropped.append(f"Dropped: {course.course_code} (no matching room exists)")
+        sorted_sessions = prepare_prioritized_sessions(courses_to_schedule, all_active_rooms, fixed_counts, course_fixed_groups)
+        total_required = scheduled_count + len(sorted_sessions)
+
+        for session in sorted_sessions:
+            course = session['course']
+            duration = session['duration']
+            is_lab = session['is_lab']
+            group_name = session['group']  
+            req_capacity = session.get('req_capacity', course.student_count)
+            
+            valid_rooms = get_valid_rooms_for_course(course, all_active_rooms, is_lab, req_capacity)
+
+            if not valid_rooms:
+                dropped_sessions.append(f"Dropped: {course.course_name} (No room available >= {req_capacity})")
+                continue
+
+            group_assigned = False
+            
+            # [NEW PRO LOGIC]: Fair Shuffling to distribute load evenly across empty days
+            sorted_days = sorted(
+                days, 
+                key=lambda d: (
+                    constraints.get_batch_day_load(course.department.id, course.semester.id, d.id, group_name),
+                    random.random()
+                )
+            )
+
+            for day in sorted_days:
+                if group_assigned: break
+                
+                if not constraints.can_schedule_daily(day.id, course, duration, group_name):
                     continue
-                ok = place_session(constraints, config, course, duration, grp, cap, days, time_slots, entries, relax=False)
-                if not ok:
-                    ok = place_session(constraints, config, course, duration, grp, cap, days, time_slots, entries, relax=True)
-                if ok:
-                    scheduled += 1
-                else:
-                    gs = f" ({grp})" if grp else ""
-                    dropped.append(f"Dropped: {course.course_code}{gs} (no free room at any time)")
 
-        place_all(lab_sessions)
-        place_all(theory_sessions)
+                b_key_grp = (day.id, course.department.id, course.semester.id, group_name)
+                b_key_all = (day.id, course.department.id, course.semester.id, None)
+                
+                occupied_slots = constraints.batch_schedule_map.get(b_key_grp, set()).union(
+                                 constraints.batch_schedule_map.get(b_key_all, set()))
+                
+                possible_starts = list(range(len(time_slots) - duration + 1))
+                
+                def calculate_slot_score(start_idx):
+                    score = 0
+                    
+                    # [NEW PRO LOGIC]: Exponential Load Penalty (e.g. load^2 * multiplier)
+                    current_load = constraints.get_batch_day_load(course.department.id, course.semester.id, day.id, group_name)
+                    day_load_penalty = (current_load ** 2) * config.day_load_penalty_multiplier
+                    score -= day_load_penalty
+                    
+                    for w in range(start_idx, start_idx + duration):
+                        if w == 0: score -= config.edge_slot_penalty 
+                        elif w == 1: score -= (config.edge_slot_penalty // 2)
+                        elif w == total_slots - 1: score -= config.edge_slot_penalty
+                        elif w == total_slots - 2: score -= (config.edge_slot_penalty // 2)
+                        else: score += config.center_gravity_bonus  
 
-        # ---------- STEP 4: validate + commit ----------
-        if entries:
-            try:
-                for e in entries:
-                    e.full_clean(); e.save()
-            except (ValidationError, IntegrityError) as ex:
-                transaction.set_rollback(True)
-                return {"status": "Error", "message": f"Database overlap prevented: {ex}"}
+                    if occupied_slots:
+                        min_dist = float('inf')
+                        for o in occupied_slots:
+                            dist = start_idx - o - 1 if o < start_idx else o - (start_idx + duration)
+                            if dist < 0: dist = 0 
+                            if dist < min_dist: min_dist = dist
+                        
+                        if min_dist == 0:
+                            score += config.zero_gap_bonus  
+                        else:
+                            score -= (min_dist * config.gap_penalty_per_slot)  
+                            
+                    left_count, right_count, l_idx, r_idx = 0, 0, start_idx - 1, start_idx + duration
+                    while l_idx in occupied_slots and l_idx not in constraints.lunch_indices:
+                        left_count += 1; l_idx -= 1
+                    while r_idx in occupied_slots and r_idx not in constraints.lunch_indices:
+                        right_count += 1; r_idx += 1
+                    if left_count + duration + right_count >= 3:
+                        score -= config.continuous_class_penalty 
+                        
+                    if group_name is not None:
+                        parallel_bonus = 0
+                        for w_slot in time_slots[start_idx : start_idx + duration]:
+                            check_key = (day.id, w_slot.id, course.department.id, course.semester.id)
+                            groups_here = constraints.batch_slot_groups.get(check_key, set())
+                            sibling_groups = [g for g in groups_here if g is not None and g != group_name]
+                            if sibling_groups:
+                                parallel_bonus += config.parallel_bonus  
+                        score += parallel_bonus
+                    
+                    return score
 
-        if dropped and not ignore_warnings:
+                possible_starts.sort(key=lambda idx: calculate_slot_score(idx), reverse=True)
+
+                for i in possible_starts:
+                    if group_assigned: break
+                    start_slot = time_slots[i]
+                    
+                    if not constraints.can_schedule_continuous(day.id, i, duration, course, group_name):
+                        continue
+                        
+                    window_slots = time_slots[i : i + duration]
+                    selected_room = None
+                    
+                    valid_rooms.sort(key=lambda r: (r.capacity, constraints.room_usage_count.get(r.id, 0)))
+                    
+                    for room in valid_rooms:
+                        if not any(constraints.is_conflict(day, w_slot, course, room, group_name) for w_slot in window_slots):
+                            selected_room = room
+                            break
+
+                    if selected_room:
+                        for slot in window_slots:
+                            constraints.assign(day, slot, course, selected_room, group_name)
+                            routines_to_create.append(RoutineEntry(
+                                day=day, time_slot=slot, course=course, 
+                                room=selected_room, group_name=group_name
+                            ))
+                        group_assigned = True
+                        scheduled_count += 1
+
+            if not group_assigned:
+                for day in sorted_days:
+                    if group_assigned: break
+                    
+                    b_key_grp = (day.id, course.department.id, course.semester.id, group_name)
+                    b_key_all = (day.id, course.department.id, course.semester.id, None)
+                    occupied_slots = constraints.batch_schedule_map.get(b_key_grp, set()).union(
+                                     constraints.batch_schedule_map.get(b_key_all, set()))
+                    
+                    possible_starts = list(range(len(time_slots) - duration + 1))
+                    
+                    def calculate_fallback_score(start_idx):
+                        score = 0
+                        current_load = constraints.get_batch_day_load(course.department.id, course.semester.id, day.id, group_name)
+                        day_load_penalty = (current_load ** 2) * config.day_load_penalty_multiplier
+                        score -= day_load_penalty
+                        
+                        for w in range(start_idx, start_idx + duration):
+                            if w == 0: score -= config.edge_slot_penalty
+                            elif w == 1: score -= (config.edge_slot_penalty // 2)
+                            elif w == total_slots - 1: score -= config.edge_slot_penalty
+                            elif w == total_slots - 2: score -= (config.edge_slot_penalty // 2)
+                            else: score += config.center_gravity_bonus
+
+                        if occupied_slots:
+                            min_dist = float('inf')
+                            for o in occupied_slots:
+                                dist = start_idx - o - 1 if o < start_idx else o - (start_idx + duration)
+                                if dist < 0: dist = 0
+                                if dist < min_dist: min_dist = dist
+                            if min_dist == 0:
+                                score += config.zero_gap_bonus
+                            else:
+                                score -= (min_dist * config.gap_penalty_per_slot)
+                                
+                        if group_name is not None:
+                            parallel_bonus = 0
+                            for w_slot in time_slots[start_idx : start_idx + duration]:
+                                check_key = (day.id, w_slot.id, course.department.id, course.semester.id)
+                                groups_here = constraints.batch_slot_groups.get(check_key, set())
+                                sibling_groups = [g for g in groups_here if g is not None and g != group_name]
+                                if sibling_groups:
+                                    parallel_bonus += config.parallel_bonus  
+                            score += parallel_bonus
+                            
+                        return score
+
+                    possible_starts.sort(key=lambda idx: calculate_fallback_score(idx), reverse=True)
+
+                    for i in possible_starts:
+                        if group_assigned: break
+                        window_slots = time_slots[i : i + duration]
+                        selected_room = None
+                        
+                        valid_rooms.sort(key=lambda r: (r.capacity, constraints.room_usage_count.get(r.id, 0)))
+                        for room in valid_rooms:
+                            if not any(constraints.is_conflict(day, w_slot, course, room, group_name) for w_slot in window_slots):
+                                selected_room = room
+                                break
+                                
+                        if selected_room:
+                            for slot in window_slots:
+                                constraints.assign(day, slot, course, selected_room, group_name)
+                                routines_to_create.append(RoutineEntry(
+                                    day=day, time_slot=slot, course=course, room=selected_room, group_name=group_name
+                                ))
+                            group_assigned = True
+                            scheduled_count += 1
+
+            if not group_assigned:
+                if is_lab and group_name is None:
+                    all_lab_rooms = get_valid_rooms_for_course(course, all_active_rooms, True, None)
+                    smaller_rooms = [r for r in all_lab_rooms if r.capacity < course.student_count]
+                    
+                    if smaller_rooms:
+                        split_cap = smaller_rooms[0].capacity
+                    else:
+                        split_cap = max(1, course.student_count // 2)
+                        
+                    num_groups = math.ceil(course.student_count / split_cap)
+                    
+                    if num_groups > 1:
+                        new_req_capacity = math.ceil(course.student_count / num_groups)
+                        
+                        if course.teacher:
+                            constraints.teacher_limits[course.teacher.id] = constraints.teacher_limits.get(course.teacher.id, 4) + (duration * (num_groups - 1))
+                        batch_key = (course.department.id, course.semester.id)
+                        constraints.batch_limits[batch_key] = constraints.batch_limits.get(batch_key, 6) + (duration * (num_groups - 1))
+                        
+                        new_groups = [f"Group {chr(65+i)}" for i in range(num_groups)]
+                        for grp in new_groups:
+                            sorted_sessions.append({
+                                'course': course, 'group': grp, 'duration': duration, 
+                                'priority_score': session['priority_score'] + config.parallel_bonus, 
+                                'is_lab': True, 'req_capacity': new_req_capacity
+                            })
+                        
+                        total_required += (num_groups - 1)
+                        continue 
+
+                grp_str = f" ({group_name})" if group_name else ""
+                dropped_sessions.append(f"Dropped: {course.course_name}{grp_str} (Global conflict)")
+
+        if routines_to_create:
+            RoutineEntry.objects.bulk_create(routines_to_create)
+
+        if len(dropped_sessions) > 0 and not ignore_warnings:
             transaction.set_rollback(True)
             return {
-                "status": "Warning", "total_classes_required": total_required,
-                "successful_classes": scheduled, "dropped_classes": len(dropped),
-                "shortage_details": dropped,
-                "message": "Unable to assign some classes. You can ignore this warning to save the partial routine."
+                "status": "Warning",
+                "total_classes_required": total_required,
+                "successful_classes": scheduled_count,
+                "dropped_classes": len(dropped_sessions),
+                "shortage_details": dropped_sessions,
+                "message": "Unable to assign some classes. You can ignore this error and save the partial routine."
             }
+
+        summary_message = "Routine generated 100% successfully" if len(dropped_sessions) == 0 else "Partial routine successfully generated. Some classes could not be scheduled due to conflicts."
+        
         return {
-            "status": "Success", "total_classes_required": total_required,
-            "successful_classes": scheduled, "dropped_classes": len(dropped),
-            "shortage_details": dropped,
-            "message": "Routine generated 100% successfully" if not dropped
-                       else "Partial routine generated. Some classes could not be scheduled."
+            "status": "Success",
+            "total_classes_required": total_required,
+            "successful_classes": scheduled_count,
+            "dropped_classes": len(dropped_sessions),
+            "shortage_details": dropped_sessions,
+            "message": summary_message
         }
 
-
-# ==============================================================================
-# ROLLBACK
-# ==============================================================================
 def rollback_routine_algorithm(department_id):
-    latest = RoutineBackup.objects.filter(department_id=department_id).order_by('-created_at').first()
-    if not latest:
-        return {"status": "Error", "message": "No backup found."}
+    latest_backup = RoutineBackup.objects.filter(department_id=department_id).order_by('-created_at').first()
+    if not latest_backup: return {"status": "Error", "message": "No backup found."}
+    
     setting = SystemSetting.objects.first()
-    if setting and setting.is_routine_locked:
-        return {"status": "Locked", "message": "System is locked."}
+    if setting and setting.is_routine_locked: return {"status": "Locked", "message": "System is locked."}
+
     RoutineEntry.objects.filter(course__department_id=department_id).delete()
-    try:
-        for item in latest.backup_data:
-            e = RoutineEntry(day_id=item['day_id'], time_slot_id=item['time_slot_id'],
-                             course_id=item['course_id'], room_id=item['room_id'],
-                             group_name=item.get('group_name'), is_fixed=item.get('is_fixed', False))
-            e.full_clean(); e.save()
-    except (ValidationError, IntegrityError) as ex:
-        return {"status": "Error", "message": f"Rollback failed: {ex}"}
+    
+    routines = [
+        RoutineEntry(
+            day_id=item['day_id'], time_slot_id=item['time_slot_id'], 
+            course_id=item['course_id'], room_id=item['room_id'], group_name=item.get('group_name'),
+            is_fixed=item.get('is_fixed', False)
+        ) for item in latest_backup.backup_data
+    ]
+    RoutineEntry.objects.bulk_create(routines)
+    
     return {"status": "Success", "message": "Routine rolled back successfully."}
