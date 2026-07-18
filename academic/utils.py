@@ -10,7 +10,7 @@ from .models import (
 
 class ScheduleConstraint:
     def __init__(self, days, time_slots, batch_constraints_dict, teacher_totals, batch_totals):
-        self.teacher_occupied = {} 
+        self.teacher_occupied = set() 
         self.room_occupied = set()
         self.course_daily_tracker = set()
         self.teacher_batch_interaction = {}
@@ -123,12 +123,8 @@ class ScheduleConstraint:
         if slot.is_lunch_break and constraint_type != 'FORCE_ALLOW_LUNCH_CLASS':
             return True
             
-        if course.teacher:
-            occupied_by_course = self.teacher_occupied.get((day_id, slot.id, course.teacher.id))
-            if occupied_by_course is not None:
-                is_lab = course.course_type and 'lab' in course.course_type.name.lower()
-                if not (is_lab and occupied_by_course == course.id):
-                    return True
+        if course.teacher and (day_id, slot.id, course.teacher.id) in self.teacher_occupied:
+            return True
                     
         if room and (day_id, slot.id, room.id) in self.room_occupied:
             return True
@@ -163,7 +159,7 @@ class ScheduleConstraint:
             if t_key not in self.teacher_occupied:
                 self.teacher_daily_count[(course.teacher.id, day_id)] = self.teacher_daily_count.get((course.teacher.id, day_id), 0) + 1
             
-            self.teacher_occupied[t_key] = course.id
+            self.teacher_occupied.add(t_key)
             self.teacher_batch_interaction[(day_id, course.teacher.id, course.department.id, course.semester.id)] = course.id
             
             sched_key = (day_id, course.teacher.id)
@@ -298,9 +294,9 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
     config_obj = AlgorithmConfig.objects.first()
     class DefaultConfig:
         parallel_bonus = 50000
-        edge_slot_penalty = 2000
+        edge_slot_penalty = 8000
         zero_gap_bonus = 1000
-        gap_penalty_per_slot = 5000 # [UPDATED]: Boosted significantly to prevent gaps
+        gap_penalty_per_slot = 10000
         center_gravity_bonus = 50
         continuous_class_penalty = 100
         day_load_penalty_multiplier = 150
@@ -473,14 +469,10 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
                         elif w == total_slots - 2: score -= (config.edge_slot_penalty // 2)
                         else: score += config.center_gravity_bonus  
 
-                    # =====================================================================
-                    # [NEW PRO LOGIC]: Lunch-Aware Gap Detection & Mega Penalties
-                    # =====================================================================
                     if occupied_slots:
                         min_gap = float('inf')
                         for o in occupied_slots:
                             gap_slots = 0
-                            # Count gap slots strictly ignoring lunch indices
                             if o < start_idx:
                                 for s in range(o + 1, start_idx):
                                     if s not in constraints.lunch_indices:
@@ -494,12 +486,10 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
                                 min_gap = gap_slots
                         
                         if min_gap == 0:
-                            score += (config.zero_gap_bonus * 2)  # Double bonus for perfectly sticking to cluster
+                            score += (config.zero_gap_bonus * 2) 
                         else:
-                            score -= (min_gap * config.gap_penalty_per_slot * 5) # Mega penalty forces move to empty day
+                            score -= (min_gap * config.gap_penalty_per_slot) 
                     else:
-                        # Day is empty. Provide a baseline bonus to encourage starting a fresh 
-                        # cluster instead of creating gaps on an already populated day.
                         score += config.zero_gap_bonus
                             
                     left_count, right_count, l_idx, r_idx = 0, 0, start_idx - 1, start_idx + duration
@@ -575,7 +565,6 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
                             elif w == total_slots - 2: score -= (config.edge_slot_penalty // 2)
                             else: score += config.center_gravity_bonus
 
-                        # [NEW PRO LOGIC]: Lunch-Aware Gap Detection for Fallback
                         if occupied_slots:
                             min_gap = float('inf')
                             for o in occupied_slots:
@@ -595,7 +584,7 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
                             if min_gap == 0:
                                 score += (config.zero_gap_bonus * 2)
                             else:
-                                score -= (min_gap * config.gap_penalty_per_slot * 5)
+                                score -= (min_gap * config.gap_penalty_per_slot)
                         else:
                             score += config.zero_gap_bonus
                                 
