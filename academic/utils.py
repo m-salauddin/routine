@@ -2,6 +2,7 @@
 import random
 import math
 from django.db import transaction
+from django.core.exceptions import ValidationError
 from .models import (
     Day, Course, TimeSlot, RoutineEntry, Room, 
     SystemSetting, RoutineBackup, BatchTimeConstraint, FixedClassSchedule,
@@ -25,17 +26,9 @@ class ScheduleConstraint:
         self.batch_constraints = batch_constraints_dict
         self.lunch_indices = {idx for idx, slot in enumerate(time_slots) if slot.is_lunch_break}
         
-        total_days = max(1, len(days))
-        
-        # Initial limits calculated dynamically based on total credits
-        self.teacher_limits = {
-            tid: math.ceil(total / total_days) + 2 
-            for tid, total in teacher_totals.items()
-        }
-        self.batch_limits = {
-            bid: math.ceil(total / total_days) + 1  
-            for bid, total in batch_totals.items()
-        }
+        self.total_days = max(1, len(days))
+        self.teacher_totals = teacher_totals
+        self.batch_totals = batch_totals
 
         self.slot_index_map = {slot.id: idx for idx, slot in enumerate(time_slots)}
         self.teacher_schedule_map = {} 
@@ -55,19 +48,23 @@ class ScheduleConstraint:
         return common_load + max_group_load
 
     def can_schedule_daily(self, day_id, course, duration, group_name=None):
-        if course.teacher:
-            t_limit = self.teacher_limits.get(course.teacher.id, 4)
-            current_t_load = self.teacher_daily_count.get((course.teacher.id, day_id), 0)
-            if current_t_load + duration > t_limit:
-                return False
-                
         dept_id, sem_id = course.department.id, course.semester.id
-        b_limit = self.batch_limits.get((dept_id, sem_id), 6)
+        
+        # [NEW PRO LOGIC]: Hard-Stop Limit for Daily Classes (Max Average + 1)
+        b_total_credits = self.batch_totals.get((dept_id, sem_id), 15)
+        batch_hard_limit = math.ceil(b_total_credits / self.total_days) + 1
         
         current_b_load = self.get_batch_day_load(dept_id, sem_id, day_id, group_name)
-        if current_b_load + duration > b_limit:
-            return False
+        if current_b_load + duration > batch_hard_limit:
+            return False # STRICT BLOCK: Prevent End-of-week dumping completely
             
+        if course.teacher:
+            t_total_credits = self.teacher_totals.get(course.teacher.id, 15)
+            teacher_hard_limit = math.ceil(t_total_credits / self.total_days) + 2
+            current_t_load = self.teacher_daily_count.get((course.teacher.id, day_id), 0)
+            if current_t_load + duration > teacher_hard_limit:
+                return False
+                
         return True
 
     def can_schedule_continuous(self, day_id, start_idx, duration, course, group_name=None):
@@ -124,24 +121,21 @@ class ScheduleConstraint:
         if slot.is_lunch_break and constraint_type != 'FORCE_ALLOW_LUNCH_CLASS':
             return True
             
-        # 1. Strict Teacher Check
         if course.teacher and (day_id, slot.id, course.teacher.id) in self.teacher_occupied:
             return True
                     
-        # 2. Strict Room Check
         if room and (day_id, slot.id, room.id) in self.room_occupied:
             return True
             
-        # 3. Strict Batch & Group Check (Matches DB clean logic)
         b_key = (day_id, slot.id, course.department.id, course.semester.id)
         if b_key in self.batch_slot_groups:
             occupied_groups = self.batch_slot_groups[b_key]
             if None in occupied_groups:
-                return True # Combined class already exists
+                return True 
             if group_name is None and len(occupied_groups) > 0:
-                return True # Trying to put combined, but group(s) exist
+                return True  
             if group_name in occupied_groups:
-                return True # This specific group already exists
+                return True  
 
         is_lab = course.course_type and 'lab' in course.course_type.name.lower()
         if not is_fixed and not is_lab and (course.id, group_name, day_id) in self.course_daily_tracker:
@@ -191,6 +185,7 @@ class ScheduleConstraint:
             self.batch_schedule_map[b_map_key] = set()
         self.batch_schedule_map[b_map_key].add(slot_idx)
 
+
 def get_valid_rooms_for_course(course, all_active_rooms, is_lab, required_capacity=None):
     if course.fixed_room and course.fixed_room.is_active:
         return [course.fixed_room]
@@ -207,25 +202,22 @@ def get_valid_rooms_for_course(course, all_active_rooms, is_lab, required_capaci
     if not valid_rooms:
         return []
 
-    if required_capacity is None:
-        valid_rooms.sort(key=lambda x: x.capacity, reverse=True)
-        return valid_rooms
-        
-    rooms_fitting = [r for r in valid_rooms if r.capacity >= required_capacity]
-    rooms_fitting.sort(key=lambda x: x.capacity) 
+    # [NEW PRO LOGIC]: Strict Capacity Filtering Enforcement
+    if required_capacity:
+        valid_rooms = [r for r in valid_rooms if r.capacity >= required_capacity]
 
-    return rooms_fitting
+    valid_rooms.sort(key=lambda x: x.capacity) 
+    return valid_rooms
+
 
 def prepare_prioritized_sessions(courses, all_active_rooms, fixed_counts=None, course_fixed_groups=None):
-    if fixed_counts is None:
-        fixed_counts = {}
-    if course_fixed_groups is None:
-        course_fixed_groups = {}
+    if fixed_counts is None: fixed_counts = {}
+    if course_fixed_groups is None: course_fixed_groups = {}
         
     all_sessions = []
     for course in courses:
         is_lab_course = course.course_type and 'lab' in course.course_type.name.lower()
-        valid_rooms = get_valid_rooms_for_course(course, all_active_rooms, is_lab_course, None)
+        valid_rooms = get_valid_rooms_for_course(course, all_active_rooms, is_lab_course, course.student_count)
         
         groups = [None]
         req_capacity = course.student_count
@@ -233,21 +225,20 @@ def prepare_prioritized_sessions(courses, all_active_rooms, fixed_counts=None, c
         if is_lab_course:
             if course.id in course_fixed_groups and None in course_fixed_groups[course.id]:
                 groups = [None]
-            elif valid_rooms and valid_rooms[0].capacity < course.student_count:
-                num_groups = math.ceil(course.student_count / valid_rooms[0].capacity)
+            elif (valid_rooms and valid_rooms[-1].capacity < course.student_count) or (not valid_rooms):
+                # Only split if even the BIGGEST room in valid_rooms is too small
+                max_cap = valid_rooms[-1].capacity if valid_rooms else (course.student_count // 2 or 1)
+                num_groups = math.ceil(course.student_count / max_cap)
                 groups = [f"Group {chr(65+i)}" for i in range(num_groups)]
                 req_capacity = math.ceil(course.student_count / num_groups)
             
         total_credits = course.credits if course.credits > 0 else 1
         fixed_bonus = 1000 if course.fixed_room else 0
-        
-        # Anchor Scheduling: Theory heavily preferred to place in the middle first
         anchor_bonus = 20000 if not is_lab_course else 5000   
 
         for grp in groups:
             remaining_credits = course.credits - fixed_counts.get((course.id, grp), 0)
-            if remaining_credits <= 0:
-                continue  
+            if remaining_credits <= 0: continue  
                 
             credits_filled = fixed_counts.get((course.id, grp), 0)
             
@@ -287,6 +278,7 @@ def prepare_prioritized_sessions(courses, all_active_rooms, fixed_counts=None, c
     
     return all_sessions
 
+
 def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=False):
     setting = SystemSetting.objects.first()
     if setting and setting.is_routine_locked:
@@ -296,11 +288,11 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
     class DefaultConfig:
         parallel_bonus = 50000
         edge_slot_penalty = 8000
-        zero_gap_bonus = 1000
+        zero_gap_bonus = 2000
         gap_penalty_per_slot = 10000
-        center_gravity_bonus = 50
-        continuous_class_penalty = 100
-        day_load_penalty_multiplier = 150
+        center_gravity_bonus = 100
+        continuous_class_penalty = 500
+        day_load_penalty_multiplier = 300
         
     config = config_obj if config_obj else DefaultConfig()
 
@@ -353,14 +345,15 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
         
         for c in courses_to_schedule:
             is_lab = c.course_type and 'lab' in c.course_type.name.lower()
-            valid_rooms = get_valid_rooms_for_course(c, all_active_rooms, is_lab, None)
+            valid_rooms = get_valid_rooms_for_course(c, all_active_rooms, is_lab, c.student_count)
             
             num_groups = 1
             if is_lab:
                 if c.id in course_fixed_groups and None in course_fixed_groups[c.id]:
                     num_groups = 1
-                elif valid_rooms and valid_rooms[0].capacity < c.student_count:
-                    num_groups = math.ceil(c.student_count / valid_rooms[0].capacity)
+                elif (valid_rooms and valid_rooms[-1].capacity < c.student_count) or (not valid_rooms):
+                    max_cap = valid_rooms[-1].capacity if valid_rooms else (c.student_count // 2 or 1)
+                    num_groups = math.ceil(c.student_count / max_cap)
                 
             total_teacher_credits = c.credits * num_groups
             if c.teacher:
@@ -414,7 +407,9 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
                     dropped_sessions.append(f"Dropped Fixed: {course.course_code}{grp_str} at {day.name} {slot.start_time} (No available room)")
 
         if fixed_routines_to_insert:
-            RoutineEntry.objects.bulk_create(fixed_routines_to_insert)
+            # We strictly assume Admin fixed assignments are intended to bypass some dynamic capacities 
+            # but they still run through validation in DB later.
+            routines_to_create.extend(fixed_routines_to_insert)
 
         sorted_sessions = prepare_prioritized_sessions(courses_to_schedule, all_active_rooms, fixed_counts, course_fixed_groups)
         total_required = scheduled_count + len(sorted_sessions)
@@ -429,12 +424,12 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
             valid_rooms = get_valid_rooms_for_course(course, all_active_rooms, is_lab, req_capacity)
 
             if not valid_rooms:
-                dropped_sessions.append(f"Dropped: {course.course_name} (No room available >= {req_capacity})")
+                dropped_sessions.append(f"Dropped: {course.course_name} (No room available with capacity >= {req_capacity})")
                 continue
 
             group_assigned = False
             
-            # Shuffles randomly among days with identical load to prevent "End-of-Week Dumping"
+            # Shuffles randomly among days with identical load to ensure perfect equal distribution
             sorted_days = sorted(
                 days, 
                 key=lambda d: (
@@ -460,12 +455,9 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
                 def calculate_slot_score(start_idx):
                     score = 0
                     
-                    # Exponential Day Load Penalty
                     current_load = constraints.get_batch_day_load(course.department.id, course.semester.id, day.id, group_name)
-                    day_load_penalty = (current_load ** 2) * config.day_load_penalty_multiplier
-                    score -= day_load_penalty
+                    score -= (current_load ** 2) * config.day_load_penalty_multiplier
                     
-                    # Edge Control Penalty
                     for w in range(start_idx, start_idx + duration):
                         if w == 0: score -= config.edge_slot_penalty 
                         elif w == 1: score -= (config.edge_slot_penalty // 2)
@@ -473,7 +465,6 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
                         elif w == total_slots - 2: score -= (config.edge_slot_penalty // 2)
                         else: score += config.center_gravity_bonus  
 
-                    # Lunch-Aware Gap Detection
                     if occupied_slots:
                         min_gap = float('inf')
                         for o in occupied_slots:
@@ -497,7 +488,6 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
                     else:
                         score += config.zero_gap_bonus
                             
-                    # Continuous limit penalty
                     left_count, right_count, l_idx, r_idx = 0, 0, start_idx - 1, start_idx + duration
                     while l_idx in occupied_slots and l_idx not in constraints.lunch_indices:
                         left_count += 1; l_idx -= 1
@@ -506,7 +496,7 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
                     if left_count + duration + right_count >= 3:
                         score -= config.continuous_class_penalty 
                         
-                    # Maximize Parallel Group Classes Bonus
+                    # [NEW PRO LOGIC]: True Buddy-System for Cross-Parallel groups
                     if group_name is not None:
                         parallel_bonus = 0
                         for w_slot in time_slots[start_idx : start_idx + duration]:
@@ -514,7 +504,7 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
                             groups_here = constraints.batch_slot_groups.get(check_key, set())
                             sibling_groups = [g for g in groups_here if g is not None and g != group_name]
                             if sibling_groups:
-                                parallel_bonus += config.parallel_bonus  
+                                parallel_bonus += config.parallel_bonus # Massive magnet to place group parallel
                         score += parallel_bonus
                     
                     return score
@@ -549,43 +539,21 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
                         scheduled_count += 1
 
             if not group_assigned:
-                # Dynamic Fallback: Split Lab Dynamically if big room fails
-                if is_lab and group_name is None:
-                    all_lab_rooms = get_valid_rooms_for_course(course, all_active_rooms, True, None)
-                    smaller_rooms = [r for r in all_lab_rooms if r.capacity < course.student_count]
-                    
-                    if smaller_rooms:
-                        split_cap = smaller_rooms[0].capacity
-                    else:
-                        split_cap = max(1, course.student_count // 2)
-                        
-                    num_groups = math.ceil(course.student_count / split_cap)
-                    
-                    if num_groups > 1:
-                        new_req_capacity = math.ceil(course.student_count / num_groups)
-                        
-                        # Dynamically update daily limits for Teacher and Batch to prevent bottleneck
-                        if course.teacher:
-                            constraints.teacher_limits[course.teacher.id] = constraints.teacher_limits.get(course.teacher.id, 4) + (duration * (num_groups - 1))
-                        batch_key = (course.department.id, course.semester.id)
-                        constraints.batch_limits[batch_key] = constraints.batch_limits.get(batch_key, 6) + (duration * (num_groups - 1))
-                        
-                        new_groups = [f"Group {chr(65+i)}" for i in range(num_groups)]
-                        for grp in new_groups:
-                            sorted_sessions.append({
-                                'course': course, 'group': grp, 'duration': duration, 
-                                'priority_score': session['priority_score'] + config.parallel_bonus, 
-                                'is_lab': True, 'req_capacity': new_req_capacity
-                            })
-                        
-                        total_required += (num_groups - 1)
-                        continue 
-
                 grp_str = f" ({group_name})" if group_name else ""
                 dropped_sessions.append(f"Dropped: {course.course_name}{grp_str} (Global conflict)")
 
+        # [NEW PRO LOGIC]: Sequential Safe Saving with DB Validations
         if routines_to_create:
-            RoutineEntry.objects.bulk_create(routines_to_create)
+            try:
+                for entry in routines_to_create:
+                    entry.clean() # Forces the DB unique constraints before committing
+                    entry.save()
+            except ValidationError as e:
+                transaction.set_rollback(True)
+                return {
+                    "status": "Error",
+                    "message": f"Critical Database Overlap Prevented! A logic conflict occurred: {str(e)}"
+                }
 
         if len(dropped_sessions) > 0 and not ignore_warnings:
             transaction.set_rollback(True)
@@ -598,7 +566,7 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
                 "message": "Unable to assign some classes. You can ignore this error and save the partial routine."
             }
 
-        summary_message = "Routine generated 100% successfully" if len(dropped_sessions) == 0 else "Partial routine successfully generated. Some classes could not be scheduled due to conflicts."
+        summary_message = "Routine generated 100% successfully" if len(dropped_sessions) == 0 else "Partial routine successfully generated. Some classes could not be scheduled due to constraints."
         
         return {
             "status": "Success",
