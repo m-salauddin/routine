@@ -215,13 +215,13 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
 
     config_obj = AlgorithmConfig.objects.first()
     class DefaultConfig:
-        parallel_bonus = 50000
-        edge_slot_penalty = 2000
+        parallel_bonus = 100000       # [UPDATE 3] Mega Magnet for perfectly parallel classes
+        edge_slot_penalty = 8000      # [UPDATE 1] Huge penalty for first & last slots
         zero_gap_bonus = 3000
         gap_penalty_per_slot = 1500
-        center_gravity_bonus = 2000
+        center_gravity_bonus = 3000   # [UPDATE 1] Pulls everyone to the middle
         continuous_class_penalty = 500
-        day_load_penalty_multiplier = 200
+        day_load_penalty_multiplier = 500 # [UPDATE 2] Exponential Day Load base multiplier
         
     config = config_obj if config_obj else DefaultConfig()
 
@@ -359,13 +359,12 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
             req_capacity = info['req_capacity']
             groups = info['groups']
             
-            # Phase Tagging Logic
             if is_lab and len(groups) == 1:
-                phase_id = 1 # Single Labs
+                phase_id = 1 
             elif is_lab and len(groups) > 1:
-                phase_id = 2 # Split Labs (Group A, B)
+                phase_id = 2 
             else:
-                phase_id = 3 # Theories
+                phase_id = 3 
             
             for grp in groups:
                 remaining_credits = course.credits - fixed_counts.get((course.id, grp), 0)
@@ -391,7 +390,6 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
                             'is_lab': False, 'req_capacity': req_capacity, 'phase': phase_id
                         })
 
-        # STRICT PHASE SORTING: Single Labs -> Split Labs -> Theories
         random.shuffle(all_sessions)
         all_sessions.sort(key=lambda x: (
             x['phase'], 
@@ -449,38 +447,31 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
                             
                     if not selected_room: continue
 
-                    # Base Day Load Penalty
-                    score = -(constraints.get_batch_day_load(course.department.id, course.semester.id, day.id, group_name) * config.day_load_penalty_multiplier)
+                    # [UPDATE 2] Exponential Day Load Penalty (Perfect Averaging Without Dropping)
+                    current_load = constraints.get_batch_day_load(course.department.id, course.semester.id, day.id, group_name)
+                    score = -((current_load ** 2) * config.day_load_penalty_multiplier)
 
-                    # [DYNAMIC SCORING BASED ON PHASE]
-                    if phase == 2: # PHASE 3 in logic: Split Labs (Morning/Evening & Parallel)
-                        if "A" in group_name:
-                            if i <= 1: score += 50000 
-                            elif i >= total_slots - duration - 1: score -= 20000
-                        elif "B" in group_name:
-                            if i >= total_slots - duration - 1: score += 50000
-                            elif i <= 1: score -= 20000
-                            
-                        # Parallel Match Bonus
+                    # [UPDATE 1] Universal Center Gravity & Edge Penalty (Applied to ALL Phases)
+                    for w in range(i, i + duration):
+                        if w == 0 or w == total_slots - 1: 
+                            score -= config.edge_slot_penalty * 2 # First & Last slot highly discouraged
+                        elif w == 1 or w == total_slots - 2: 
+                            score -= config.edge_slot_penalty
+                        else: 
+                            score += config.center_gravity_bonus # Middle slots are best
+
+                    # [UPDATE 3] Mega Magnet for Parallel Labs
+                    if phase == 2:
                         parallel_bonus = 0
                         for w_slot in window_slots:
                             check_key = (day.id, w_slot.id, course.department.id, course.semester.id)
                             groups_here = constraints.batch_slot_groups.get(check_key, set())
                             sibling_groups = [g for g in groups_here if g is not None and g != group_name]
                             if sibling_groups:
-                                parallel_bonus += config.parallel_bonus  
+                                parallel_bonus += config.parallel_bonus # +100,000 points! 
                         score += parallel_bonus
                         
-                    elif phase == 3: # PHASE 4 in logic: Theory Fillers (Center Gravity)
-                        for w in range(i, i + duration):
-                            if w == 0 or w == total_slots - 1: 
-                                score -= config.edge_slot_penalty * 2 # Strongly push away from edges
-                            elif w == 1 or w == total_slots - 2: 
-                                score -= config.edge_slot_penalty
-                            else: 
-                                score += config.center_gravity_bonus * 2 # Extremely strong magnet for center
-
-                    # Gap checking logic
+                    # Zero-Gap / Gap Penalty Logic
                     if occupied_slots:
                         min_gap = float('inf')
                         for o in occupied_slots:
