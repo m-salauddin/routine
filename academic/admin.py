@@ -25,6 +25,24 @@ User = get_user_model()
 
 
 
+# @admin.register(FixedClassSchedule)
+# class FixedClassScheduleAdmin(admin.ModelAdmin):
+#     list_display = ('course', 'day', 'time_slot', 'room', 'group_name')
+#     list_filter = ('day', 'course__department', 'course__semester')
+#     search_fields = ('course__course_name', 'course__course_code')
+#     ordering = ('day__order', 'time_slot__start_time')
+    
+#     # Admin form fieldsets to organize the fields in the admin interface
+#     fieldsets = (
+#         ('Course & Time', {
+#             'fields': ('course', 'day', 'time_slot')
+#         }),
+#         ('Optional Settings', {
+#             'fields': ('room', 'group_name'),
+#             'classes': ('collapse',),
+#         }),
+#     )
+
 @admin.register(FixedClassSchedule)
 class FixedClassScheduleAdmin(admin.ModelAdmin):
     list_display = ('course', 'day', 'time_slot', 'room', 'group_name')
@@ -32,7 +50,10 @@ class FixedClassScheduleAdmin(admin.ModelAdmin):
     search_fields = ('course__course_name', 'course__course_code')
     ordering = ('day__order', 'time_slot__start_time')
     
+    
+    autocomplete_fields = ('course',) 
     # Admin form fieldsets to organize the fields in the admin interface
+    
     fieldsets = (
         ('Course & Time', {
             'fields': ('course', 'day', 'time_slot')
@@ -42,6 +63,9 @@ class FixedClassScheduleAdmin(admin.ModelAdmin):
             'classes': ('collapse',),
         }),
     )
+
+
+
 
 
 # CUSTOM WIDGETS (For Two-way Export & Import)
@@ -332,7 +356,7 @@ from .models import AlgorithmConfig
 class AlgorithmConfigAdmin(admin.ModelAdmin):
     list_display = ('__str__', 'parallel_bonus', 'edge_slot_penalty', 'zero_gap_bonus')
 
-    # শুধু একটি ডাটা থাকবে, তাই নতুন করে Add করার অপশন অফ করে দিচ্ছি (যদি অলরেডি একটা থাকে)
+    
     def has_add_permission(self, request):
         if AlgorithmConfig.objects.exists():
             return False

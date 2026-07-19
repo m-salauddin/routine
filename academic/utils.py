@@ -216,7 +216,7 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
     config_obj = AlgorithmConfig.objects.first()
     class DefaultConfig:
         parallel_bonus = 100000       # [UPDATE 3] Mega Magnet for perfectly parallel classes
-        edge_slot_penalty = 8000      # [UPDATE 1] Huge penalty for first & last slots
+        edge_slot_penalty = 5000      # [UPDATE 1] Huge penalty for first & last slots
         zero_gap_bonus = 3000
         gap_penalty_per_slot = 1500
         center_gravity_bonus = 3000   # [UPDATE 1] Pulls everyone to the middle
