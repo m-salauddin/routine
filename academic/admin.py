@@ -247,6 +247,7 @@ class BatchAdmin(ImportExportModelAdmin):
     list_filter = ('department', 'status', 'is_active')
     search_fields = ('name',)
 
+
 @admin.register(Room)
 class RoomAdmin(ImportExportModelAdmin):
     resource_class = RoomResource
@@ -257,16 +258,23 @@ class RoomAdmin(ImportExportModelAdmin):
 
 
 
+
+
+
+
+
 @admin.register(Course)
 class CourseAdmin(ImportExportModelAdmin):
     resource_class = CourseResource
-    # UPDATE: Added 'fixed_room' at the end to easily spot fixed classes in the admin table
+    
     list_display = ('course_code', 'course_name', 'credits', 'course_type', 'department', 'teacher', 'fixed_room', 'is_active')
     
-    # UPDATE: Added 'fixed_room' to the filter so admins can filter courses that have fixed rooms
     list_filter = ('department', 'semester', 'course_type', 'fixed_room', 'is_active')
     
     search_fields = ('course_name', 'course_code', 'teacher__username')
+
+
+    autocomplete_fields = ('offering_department', 'preferred_room_department', 'teacher', 'fixed_room')
 
 # academic/admin.py er vitorer RoutineEntryAdmin class ti update korun
 

@@ -31,6 +31,7 @@ class UserResource(resources.ModelResource):
 # ==============================================================================
 # ADMIN CLASS (Merging Custom Fields with Django's Built-in UserAdmin)
 # ==============================================================================
+
 @admin.register(User)
 class CustomUserAdmin(ImportExportModelAdmin, UserAdmin):
     resource_class = UserResource
