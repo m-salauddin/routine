@@ -1,14 +1,10 @@
 # academic/serializers.py
 from rest_framework import serializers
 
-# Importing all models including the new dynamic ones and Notification
-from .models import ActivityLog, Day, RoomType, RoomSubType, Department, Semester, Course, TimeSlot, RoutineEntry, Room, Notification,Notice
+# Importing all models 
+from .models import ActivityLog, Day, RoomType, RoomSubType, Department, Semester, Course, TimeSlot, RoutineEntry, Room, Notification,Notice,AlgorithmConfig,FixedClassSchedule
 
-from rest_framework import serializers
-from .models import FixedClassSchedule
 
-from rest_framework import serializers
-from .models import FixedClassSchedule
 
 class FixedClassScheduleSerializer(serializers.ModelSerializer):
     # showing related fields for better frontend display
@@ -60,7 +56,7 @@ class SemesterSerializer(serializers.ModelSerializer):
         model = Semester
         fields = ['id', 'name', 'order']
 
-# 1. Updated RoomSerializer
+# 1.RoomSerializer
 class RoomSerializer(serializers.ModelSerializer):
     department_name = serializers.CharField(source='department.name', read_only=True)
     
@@ -102,62 +98,11 @@ class CourseSerializer(serializers.ModelSerializer):
             'fixed_room', 'fixed_room_number'
         ]
 
-# class CourseSerializer(serializers.ModelSerializer):
-#     teacher_name = serializers.CharField(source='teacher.username', read_only=True)
-#     department_name = serializers.CharField(source='department.name', read_only=True)
-#     semester_name = serializers.CharField(source='semester.name', read_only=True)
-    
-#     # Fetching string names for frontend convenience
-#     fixed_room_number = serializers.CharField(source='fixed_room.room_number', read_only=True)
-#     course_type_name = serializers.CharField(source='course_type.name', read_only=True)
-#     course_sub_type_name = serializers.CharField(source='course_sub_type.name', read_only=True)
-
-#     # UPDATE: Removed 'fixed_day_name' completely as it no longer exists in the database.
-
-#     class Meta:
-#         model = Course
-#         fields = [
-#             'id', 'course_code', 'course_name', 'student_count',
-#             'credits', 
-#             'course_type', 'course_type_name', 
-#             'course_sub_type', 'course_sub_type_name',
-#             'teacher', 'teacher_name',
-#             'department', 'department_name',
-#             'semester', 'semester_name',
-#             'fixed_room', 'fixed_room_number'
-         
-#         ]
-#     teacher_name = serializers.CharField(source='teacher.username', read_only=True)
-#     department_name = serializers.CharField(source='department.name', read_only=True)
-#     semester_name = serializers.CharField(source='semester.name', read_only=True)
-    
-#     # Fetching string names for frontend convenience
-#     fixed_room_number = serializers.CharField(source='fixed_room.room_number', read_only=True)
-#     course_type_name = serializers.CharField(source='course_type.name', read_only=True)
-#     course_sub_type_name = serializers.CharField(source='course_sub_type.name', read_only=True)
-#     fixed_day_name = serializers.CharField(source='fixed_day.name', read_only=True)
-
-#     class Meta:
-#         model = Course
-#         fields = [
-#             'id', 'course_code', 'course_name', 'student_count',
-#             'credits', 
-#             'course_type', 'course_type_name', 
-#             'course_sub_type', 'course_sub_type_name',
-#             'teacher', 'teacher_name',
-#             'department', 'department_name',
-#             'semester', 'semester_name',
-#             'fixed_room', 'fixed_room_number', 
-#             'fixed_day', 'fixed_day_name', 
-#             'fixed_time_slot'
-#         ]
-
 
 
 class TimeSlotSerializer(serializers.ModelSerializer):
     class Meta:
         model = TimeSlot
-        # Ekhane 'is_lunch_break' field ta notun kore add kora holo
         fields = ['id', 'start_time', 'end_time', 'is_lunch_break']
 
 
@@ -226,7 +171,6 @@ class RoutineEntrySerializer(serializers.ModelSerializer):
 # 5. NOTIFICATION SERIALIZER
 # ==============================================================================
 
-# academic/serializers.py
 class NotificationSerializer(serializers.ModelSerializer):
     sender_name = serializers.CharField(source='sender.username', read_only=True, default="System")
     created_at_formatted = serializers.DateTimeField(source='created_at', format="%Y-%m-%d %I:%M %p", read_only=True)
@@ -252,24 +196,10 @@ class NoticeSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'sender', 'sender_name', 'notice_type', 
             'title', 'message', 'target_departments', 
-            'target_batches', # Semester রিমুভ করা হয়েছে
+            'target_batches', 
             'created_at_formatted'
         ]
         read_only_fields = ['sender']
-
-# class NoticeSerializer(serializers.ModelSerializer):
-#     sender_name = serializers.CharField(source='sender.username', read_only=True)
-#     created_at_formatted = serializers.DateTimeField(source='created_at', format="%Y-%m-%d %I:%M %p", read_only=True)
-    
-#     class Meta:
-#         model = Notice
-#         fields = [
-#             'id', 'sender', 'sender_name', 'notice_type', 
-#             'title', 'message', 'target_departments', 
-#             'target_semesters', 'target_batches', 
-#             'created_at_formatted'
-#         ]
-#         read_only_fields = ['sender']
 
 
 # ==============================================================================
@@ -288,9 +218,7 @@ class ActivityLogSerializer(serializers.ModelSerializer):
 
 
 
-# academic/serializers.py
-from rest_framework import serializers
-from .models import AlgorithmConfig
+
 
 class AlgorithmConfigSerializer(serializers.ModelSerializer):
     class Meta:

@@ -10,55 +10,36 @@ import datetime
 from drf_yasg.utils import swagger_auto_schema
 from drf_yasg import openapi
 from rest_framework.views import APIView
-from rest_framework.response import Response
 from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
 from .models import RoutineEntry
-from rest_framework.views import APIView
-from rest_framework.response import Response
-from rest_framework import status
-from rest_framework.permissions import IsAuthenticated
 from django.db.models import Q
-
-
 from rest_framework import viewsets, status
-from rest_framework.views import APIView
 from rest_framework.response import Response
-from rest_framework.permissions import IsAuthenticated
 from rest_framework.parsers import MultiPartParser, FormParser
-
-from drf_yasg.utils import swagger_auto_schema
-from drf_yasg import openapi
+from user_api.permissions import IsAdminUser
+from rest_framework import status
+from django.shortcuts import get_object_or_404
 
 from .admin import CourseResource, RoomResource, DepartmentResource, BatchResource, RoutineEntryResource, SemesterResource, UserResource
 from user_api.admin import UserResource
 
 from .models import (
-    Department, Semester, Course, TimeSlot, RoutineEntry, Room, 
-    RoomType, RoomSubType, Day, BatchTimeConstraint, SystemBackup, Batch,
+    Department, Semester, Course, TimeSlot, RoutineEntry, Room,Department,ActivityLog,
+    RoomType, RoomSubType, Day, BatchTimeConstraint, SystemBackup, Batch,AlgorithmConfig,
     TemporarySwapRequest,FixedClassSchedule,Notification,RoutineEntry, ActivityLog, SystemSetting
 
 )
 from .utils import generate_routine_algorithm, rollback_routine_algorithm
 from .serializers import (
-    DepartmentSerializer, SemesterSerializer, CourseSerializer, NotificationSerializer,
+    DepartmentSerializer, SemesterSerializer, CourseSerializer, NotificationSerializer,ActivityLogSerializer,AlgorithmConfigSerializer,
     TimeSlotSerializer, RoutineEntrySerializer, RoomSerializer,FixedClassScheduleSerializer,NoticeSerializer,Notice
 )
 
-from user_api.permissions import IsAdminUser
+
+
 
 User = get_user_model()
-
-
-
-
-from rest_framework.views import APIView
-from rest_framework.response import Response
-from rest_framework import status
-from rest_framework.permissions import IsAuthenticated
-
-from drf_yasg import openapi
-from django.shortcuts import get_object_or_404
 
 
 
@@ -552,14 +533,7 @@ class RoutineListView(APIView):
 
         return Response(modified_data)
 
-import datetime
-from django.db.models import Q
-from rest_framework.views import APIView
-from rest_framework.response import Response
-from rest_framework import status
-from rest_framework.permissions import IsAuthenticated
-from drf_yasg.utils import swagger_auto_schema
-from drf_yasg import openapi
+
 
 class DepartmentRoutineView(APIView):
     permission_classes = [IsAuthenticated]
@@ -583,7 +557,7 @@ class DepartmentRoutineView(APIView):
 
         teacher_dept = user.department
 
-        # বেস রুটিন ফেচ করা (যেগুলো অ্যাক্টিভ)
+        
         routines = RoutineEntry.objects.filter(
             is_active=True
         ).filter(
@@ -592,7 +566,7 @@ class DepartmentRoutineView(APIView):
             Q(course__teacher__department=teacher_dept)          
         ).select_related('day', 'time_slot', 'course', 'room').distinct()
 
-        # ডে এবং টাইমের উপর ভিত্তি করে সর্টিং
+        
         routines = routines.order_by('day__order', 'time_slot__start_time')
         
         serializer = RoutineEntrySerializer(routines, many=True)
@@ -867,320 +841,12 @@ class TeacherCancelClassView(APIView):
             entry.save()
             
             ActivityLog.objects.create(actor=request.user, action_description=f"UPDATED cancellation message for: {entry.course.course_name}.", severity='INFO')
-            notify_students_about_class(entry, 'update', request.user, new_cancel_message) # [NEW] Notification Call
+            notify_students_about_class(entry, 'update', request.user, new_cancel_message) 
             
             return Response({"status": "success", "message": "Cancellation message updated successfully.", "cancel_message": new_cancel_message})
 
         else:
             return Response({"error": "Invalid action. Please use 'cancel', 'reactivate', or 'update'."}, status=status.HTTP_400_BAD_REQUEST)
-
-# class AdminCancelClassView(APIView):
-#     permission_classes = [IsAdminUser]
-
-#     @swagger_auto_schema(
-#         tags=['2. Manual Operations'],
-#         request_body=openapi.Schema(
-#             type=openapi.TYPE_OBJECT,
-#             properties={
-#                 'action': openapi.Schema(
-#                     type=openapi.TYPE_STRING, 
-#                     description="Action type: 'cancel', 'reactivate', or 'update'"
-#                 ),
-#                 'cancel_message': openapi.Schema(
-#                     type=openapi.TYPE_STRING, 
-#                     description="Required for 'cancel' and 'update' actions."
-#                 ),
-#             },
-#             required=['action']
-#         ),
-#         operation_description="**[ADMIN ONLY]** Temporarily cancel any class, reactivate an off class, or update the cancel message for any routine entry."
-#     )
-#     def post(self, request, entry_id):
-#         try:
-#             # admin can access any routine entry, so no teacher filter is applied
-#             entry = RoutineEntry.objects.get(id=entry_id)
-#         except RoutineEntry.DoesNotExist:
-#             return Response(
-#                 {"error": "Routine entry not found."}, 
-#                 status=status.HTTP_404_NOT_FOUND
-#             )
-
-#         action = request.data.get('action')
-
-#         # ১. Class Cancel Logic
-#         if action == 'cancel':
-#             # if admin does not provide a custom message, use a default cancellation message
-#             cancel_message = request.data.get('cancel_message', 'Class temporarily cancelled by Administration.')
-#             entry.is_cancelled = True
-#             entry.cancel_message = cancel_message
-#             entry.save()
-            
-#             # ==========================================================
-#             # ACTIVITY LOG (Admin Cancel)
-#             # ==========================================================
-#             ActivityLog.objects.create(
-#                 actor=request.user,
-#                 action_description=f"ADMIN CANCELLED class: {entry.course.course_code} ({entry.course.course_name}) on {entry.day.name}.", 
-#                 severity='WARNING'
-#             )
-#             return Response({
-#                 "status": "success",
-#                 "message": "Class cancelled successfully by Admin.", 
-#                 "cancel_message": cancel_message
-#             })
-        
-#         # ২. Class Reactivate Logic 
-#         elif action == 'reactivate':
-#             entry.is_cancelled = False
-#             entry.cancel_message = None  
-#             entry.save()
-            
-#             # ==========================================================
-#             # ACTIVITY LOG (Admin Reactivate)
-#             # ==========================================================
-#             ActivityLog.objects.create(
-#                 actor=request.user, 
-#                 action_description=f"ADMIN REACTIVATED class: {entry.course.course_code} ({entry.course.course_name}) on {entry.day.name}.", 
-#                 severity='SUCCESS'
-#             )
-#             return Response({
-#                 "status": "success",
-#                 "message": "Class reactivated successfully by Admin."
-#             })
-
-#         # ৩. Cancel Message Update Logic
-#         elif action == 'update':
-#             if not entry.is_cancelled:
-#                 return Response(
-#                     {"error": "Cannot update message. The class is not cancelled yet."}, 
-#                     status=status.HTTP_400_BAD_REQUEST
-#                 )
-            
-#             new_cancel_message = request.data.get('cancel_message', '')
-#             if not new_cancel_message:
-#                 return Response(
-#                     {"error": "Cancel message cannot be empty for update action."}, 
-#                     status=status.HTTP_400_BAD_REQUEST
-#                 )
-                
-#             entry.cancel_message = new_cancel_message
-#             entry.save()
-            
-#             # ==========================================================
-#             # ACTIVITY LOG (Admin Update Message)
-#             # ==========================================================
-#             ActivityLog.objects.create(
-#                 actor=request.user, 
-#                 action_description=f"ADMIN UPDATED cancellation message for: {entry.course.course_code}.", 
-#                 severity='INFO'
-#             )
-#             return Response({
-#                 "status": "success",
-#                 "message": "Cancellation message updated successfully by Admin.", 
-#                 "cancel_message": new_cancel_message
-#             })
-
-#         # if the action is none of the above, return an error
-#         else:
-#             return Response(
-#                 {"error": "Invalid action. Please use 'cancel', 'reactivate', or 'update'."}, 
-#                 status=status.HTTP_400_BAD_REQUEST
-#             )
-#     permission_classes = [IsAdminUser]  
-
-#     @swagger_auto_schema(
-#         tags=['4. Enterprise Operations'], 
-#         request_body=openapi.Schema(
-#             type=openapi.TYPE_OBJECT,
-#             properties={
-#                 'action': openapi.Schema(
-#                     type=openapi.TYPE_STRING, 
-#                     description="Action type: 'cancel', 'reactivate', or 'update'"
-#                 ),
-#                 'cancel_message': openapi.Schema(
-#                     type=openapi.TYPE_STRING, 
-#                     description="Required for 'cancel' and 'update' actions."
-#                 ),
-#             },
-#             required=['action']
-#         ),
-#         operation_description="**[ADMIN ONLY]** Temporarily cancel ANY class, reactivate an off class, or update the cancel message."
-#     )
-#     def post(self, request, entry_id):
-#         try:
-#             # Admin can access any routine entry, so no teacher filter is applied
-#             entry = RoutineEntry.objects.get(id=entry_id)
-#         except RoutineEntry.DoesNotExist:
-#             return Response(
-#                 {"error": "Routine entry not found."}, 
-#                 status=status.HTTP_404_NOT_FOUND
-#             )
-
-#         action = request.data.get('action')
-
-#         # ১. class cancel logic (Admin)
-#         if action == 'cancel':
-#             # if no custom message is provided, use a default admin cancellation message
-#             cancel_message = request.data.get('cancel_message', 'Class temporarily cancelled by Administration.')
-#             entry.is_cancelled = True
-#             entry.cancel_message = cancel_message
-#             entry.save()
-            
-#             ActivityLog.objects.create(
-#                 actor=request.user,
-#                 action_description=f"ADMIN CANCELLED class: {entry.course.course_name} on {entry.day.name}.", 
-#                 severity='WARNING'
-#             )
-#             return Response({
-#                 "status": "success",
-#                 "message": "Class cancelled successfully by Admin.", 
-#                 "cancel_message": cancel_message
-#             })
-
-#         # ২. again class re-activate (Admin)
-#         elif action == 'reactivate':
-#             entry.is_cancelled = False
-#             entry.cancel_message = None
-#             entry.save()
-            
-#             ActivityLog.objects.create(
-#                 actor=request.user, 
-#                 action_description=f"ADMIN REACTIVATED class: {entry.course.course_name} on {entry.day.name}.", 
-#                 severity='SUCCESS'
-#             )
-#             return Response({
-#                 "status": "success",
-#                 "message": "Class reactivated successfully by Admin."
-#             })
-
-#         # ৩. off class message update logic (Admin)
-#         elif action == 'update':
-#             if not entry.is_cancelled:
-#                 return Response(
-#                     {"error": "Cannot update message. The class is not cancelled yet."}, 
-#                     status=status.HTTP_400_BAD_REQUEST
-#                 )
-            
-#             new_cancel_message = request.data.get('cancel_message', '')
-#             if not new_cancel_message:
-#                 return Response(
-#                     {"error": "Cancel message cannot be empty for update action."}, 
-#                     status=status.HTTP_400_BAD_REQUEST
-#                 )
-                
-#             entry.cancel_message = new_cancel_message
-#             entry.save()
-            
-#             ActivityLog.objects.create(
-#                 actor=request.user, 
-#                 action_description=f"ADMIN UPDATED cancellation message for: {entry.course.course_name}.", 
-#                 severity='INFO'
-#             )
-#             return Response({
-#                 "status": "success",
-#                 "message": "Cancellation message updated successfully by Admin.", 
-#                 "cancel_message": new_cancel_message
-#             })
-
-#         # if the action is none of the above
-#         else:
-#             return Response(
-#                 {"error": "Invalid action. Please use 'cancel', 'reactivate', or 'update'."}, 
-#                 status=status.HTTP_400_BAD_REQUEST
-#             )
-        
-
-
-
-# class TeacherCancelClassView(APIView):
-#     permission_classes = [IsAuthenticated]
-
-#     @swagger_auto_schema(
-#         tags=['3. Teacher Panel'],
-#         request_body=openapi.Schema(
-#             type=openapi.TYPE_OBJECT,
-#             properties={
-#                 'action': openapi.Schema(
-#                     type=openapi.TYPE_STRING, 
-#                     description="Action type: 'cancel', 'reactivate', or 'update'"
-#                 ),
-#                 'cancel_message': openapi.Schema(
-#                     type=openapi.TYPE_STRING, 
-#                     description="Required for 'cancel' and 'update' actions."
-#                 ),
-#             },
-#             required=['action']
-#         ),
-#         operation_description="Cancel a class, reactivate an off class, or update the cancel message."
-#     )
-#     def post(self, request, entry_id):
-#         try:
-#             # Check if the entry exists and belongs to the logged-in teacher
-#             entry = RoutineEntry.objects.get(id=entry_id, course__teacher=request.user)
-#         except RoutineEntry.DoesNotExist:
-#             return Response(
-#                 {"error": "Routine entry not found or you don't have permission to modify this class."}, 
-#                 status=status.HTTP_404_NOT_FOUND
-#             )
-
-#         action = request.data.get('action')
-
-#         # ১. class cancel logic
-#         if action == 'cancel':
-#             cancel_message = request.data.get('cancel_message', 'Class cancelled by teacher.')
-#             entry.is_cancelled = True
-#             entry.cancel_message = cancel_message
-#             entry.save()
-#             ActivityLog.objects.create(actor=request.user,action_description=f"CANCELLED class: {entry.course.course_name} on {entry.day.name}.", severity='WARNING')
-#             return Response({
-#                 "status": "success",
-#                 "message": "Class cancelled successfully.", 
-#                 "cancel_message": cancel_message
-#             })
-        
-
-#         # ২. again class re-activate
-#         elif action == 'reactivate':
-#             entry.is_cancelled = False
-#             entry.cancel_message = None  # Remove the cancellation message when reactivating
-#             entry.save()
-#             ActivityLog.objects.create(actor=request.user, action_description=f"REACTIVATED class: {entry.course.course_name} on {entry.day.name}.", severity='SUCCESS')
-#             return Response({
-#                 "status": "success",
-#                 "message": "Class reactivated successfully. The cancellation message has been removed."
-#             })
-
-#         # ৩. off class massage update logic
-#         elif action == 'update':
-#             if not entry.is_cancelled:
-#                 return Response(
-#                     {"error": "Cannot update message. The class is not cancelled yet."}, 
-#                     status=status.HTTP_400_BAD_REQUEST
-#                 )
-            
-#             new_cancel_message = request.data.get('cancel_message', '')
-#             if not new_cancel_message:
-#                 return Response(
-#                     {"error": "Cancel message cannot be empty for update action."}, 
-#                     status=status.HTTP_400_BAD_REQUEST
-#                 )
-                
-#             entry.cancel_message = new_cancel_message
-#             entry.save()
-#             ActivityLog.objects.create(actor=request.user, action_description=f"UPDATED cancellation message for: {entry.course.course_name}.", severity='INFO')
-#             return Response({
-#                 "status": "success",
-#                 "message": "Cancellation message updated successfully.", 
-#                 "cancel_message": new_cancel_message
-#             })
-
-#         # if the action is none of the above, return an error
-#         else:
-#             return Response(
-#                 {"error": "Invalid action. Please use 'cancel', 'reactivate', or 'update'."}, 
-#                 status=status.HTTP_400_BAD_REQUEST
-#             )
-
 
 
 class ManualRoutineUpdateView(APIView):
@@ -1297,10 +963,11 @@ class RoutineSwapView(APIView):
             )
 
         return Response({"status": "success", "message": "Duti class er shudhu somoy successfully swap kora hoyeche!"})
+
+
 # ==============================================================================
 # DYNAMIC EXCEL IMPORT & EXPORT APIs (Master API)
 # ==============================================================================
-
 
 
 
@@ -1542,15 +1209,6 @@ class SystemSnapshotView(APIView):
 # 6. SYSTEM NOTIFICATIONS API
 # ==============================================================================
 
-# academic/views.py
-
-from drf_yasg.utils import swagger_auto_schema
-from rest_framework.views import APIView
-from rest_framework.response import Response
-from rest_framework import status
-from rest_framework.permissions import IsAuthenticated
-# নিশ্চিত করুন যে Notice, NoticeSerializer, Notification এবং User আপনার ফাইলে ইমপোর্ট করা আছে
-
 class NoticeListCreateView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -1726,78 +1384,10 @@ class MarkNotificationReadView(APIView):
             return Response({"error": "Notification not found."}, status=status.HTTP_404_NOT_FOUND)
         
 
-
-# class NoticeListCreateView(APIView):
-#     permission_classes = [IsAuthenticated]
-
-#     def get(self, request):
-#         notices = Notice.objects.all()
-#         serializer = NoticeSerializer(notices, many=True)
-#         return Response(serializer.data)
-
-#     def post(self, request):
-       
-#         if request.user.role not in ['ADMIN', 'TEACHER']: 
-#             return Response({"error": "You do not have permission to create notices."}, status=status.HTTP_403_FORBIDDEN)
-
-#         serializer = NoticeSerializer(data=request.data)
-#         if serializer.is_valid():
-#             notice = serializer.save(sender=request.user)
-            
-#             # Auto-generate Notifications
-#             target_users = self.get_users_for_notice(notice)
-            
-#             notifications_to_create = []
-#             for user in target_users:
-#                 if user.id != request.user.id:
-#                     notifications_to_create.append(
-#                         Notification(
-#                             recipient=user,
-#                             sender=request.user,
-#                             related_notice=notice, 
-#                             notification_type='NOTICE',
-#                             title=notice.title,
-#                             message=notice.message,
-#                             action_url="/notices"
-#                         )
-#                     )
-            
-#             if notifications_to_create:
-#                 Notification.objects.bulk_create(notifications_to_create)
-
-#             return Response({"status": "success", "message": "Notice created and notifications sent.", "data": serializer.data}, status=status.HTTP_201_CREATED)
-#         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-
-#     def get_users_for_notice(self, notice):
-#         if notice.notice_type == 'GLOBAL':
-#             return User.objects.filter(is_active=True)
-        
-      
-#         dept_ids = notice.target_departments.values_list('id', flat=True)
-#         sem_ids = notice.target_semesters.values_list('id', flat=True)
-#         batch_ids = notice.target_batches.values_list('id', flat=True) 
-        
-#         users = User.objects.filter(is_active=True)
-        
-#         if dept_ids:
-#             users = users.filter(department__id__in=dept_ids)
-#         if sem_ids:
-#             users = users.filter(semester__id__in=sem_ids)
-#         if batch_ids:
-#             users = users.filter(batch__id__in=batch_ids) 
-            
-#         return users.distinct()
-
-
-
-
-
 # ==============================================================================
 # 7. SYSTEM LOGS API (AUDIT TRAIL)
 # ==============================================================================
-from django.db.models import Q
-from .models import ActivityLog
-from .serializers import ActivityLogSerializer
+
 
 class BaseActivityLogView(APIView):
     permission_classes = [IsAuthenticated]
@@ -1906,14 +1496,6 @@ class SystemSettingView(APIView):
         }, status=status.HTTP_200_OK)
     
 
-
-import datetime
-from rest_framework.views import APIView
-from rest_framework.response import Response
-from rest_framework import status
-from rest_framework.permissions import IsAuthenticated
-from drf_yasg.utils import swagger_auto_schema
-from drf_yasg import openapi
 
 class TeacherSwapRequestView(APIView):
     permission_classes = [IsAuthenticated]
@@ -2083,79 +1665,6 @@ class TeacherSwapRequestView(APIView):
             return Response({"error": "Pending request not found or you are not authorized."}, status=status.HTTP_404_NOT_FOUND)
 
 
-
-
-
-# class NoticeListCreateView(APIView):
-#     permission_classes = [IsAuthenticated]
-
-#     def get(self, request):
-#         notices = Notice.objects.all()
-#         serializer = NoticeSerializer(notices, many=True)
-#         return Response(serializer.data)
-
-#     def post(self, request):
-       
-#         if request.user.role not in ['ADMIN', 'TEACHER']: 
-#             return Response({"error": "You do not have permission to create notices."}, status=status.HTTP_403_FORBIDDEN)
-
-#         serializer = NoticeSerializer(data=request.data)
-#         if serializer.is_valid():
-#             notice = serializer.save(sender=request.user)
-            
-#             # Auto-generate Notifications
-#             target_users = self.get_users_for_notice(notice)
-            
-#             notifications_to_create = []
-#             for user in target_users:
-#                 if user.id != request.user.id:
-#                     notifications_to_create.append(
-#                         Notification(
-#                             recipient=user,
-#                             sender=request.user,
-#                             related_notice=notice, 
-#                             notification_type='NOTICE',
-#                             title=notice.title,
-#                             message=notice.message,
-#                             action_url="/notices"
-#                         )
-#                     )
-            
-#             if notifications_to_create:
-#                 Notification.objects.bulk_create(notifications_to_create)
-
-#             return Response({"status": "success", "message": "Notice created and notifications sent.", "data": serializer.data}, status=status.HTTP_201_CREATED)
-#         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-
-#     def get_users_for_notice(self, notice):
-#         if notice.notice_type == 'GLOBAL':
-#             return User.objects.filter(is_active=True)
-        
-      
-#         dept_ids = notice.target_departments.values_list('id', flat=True)
-#         sem_ids = notice.target_semesters.values_list('id', flat=True)
-#         batch_ids = notice.target_batches.values_list('id', flat=True) 
-        
-#         users = User.objects.filter(is_active=True)
-        
-#         if dept_ids:
-#             users = users.filter(department__id__in=dept_ids)
-#         if sem_ids:
-#             users = users.filter(semester__id__in=sem_ids)
-#         if batch_ids:
-#             users = users.filter(batch__id__in=batch_ids) 
-            
-#         return users.distinct()
-
-
-from rest_framework.views import APIView
-from rest_framework.response import Response
-from rest_framework import status
-from rest_framework.permissions import IsAuthenticated
-from drf_yasg.utils import swagger_auto_schema
-from drf_yasg import openapi
-from .models import Department 
-
 class UniversityDepartmentListView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -2212,19 +1721,8 @@ class UniversityDepartmentListView(APIView):
     
 
 
-
-
-
-# academic/views.py
-from rest_framework.views import APIView
-from rest_framework.response import Response
-from rest_framework import status
-from .models import AlgorithmConfig
-from .serializers import AlgorithmConfigSerializer
-
 class AlgorithmConfigAPIView(APIView):
     def get_object(self):
-        # ডাটাবেজে কনফিগারেশন না থাকলে অটোমেটিক ডিফল্ট ভ্যালু দিয়ে একটা তৈরি করে নেবে
         obj, created = AlgorithmConfig.objects.get_or_create(id=1)
         return obj
 

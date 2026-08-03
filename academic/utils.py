@@ -53,15 +53,18 @@ class ScheduleConstraint:
                     max_group_load = v
         return common_load + max_group_load
 
-    def can_schedule_daily(self, day_id, course, duration, group_name=None):
+    # [UPDATE]: Emergency mode added to prevent dropping classes
+    def can_schedule_daily(self, day_id, course, duration, group_name=None, is_emergency=False):
+        extra_limit = 3 if is_emergency else 0
+        
         if course.teacher:
-            t_limit = self.teacher_limits.get(course.teacher.id, 4)
+            t_limit = self.teacher_limits.get(course.teacher.id, 4) + extra_limit
             current_t_load = self.teacher_daily_count.get((course.teacher.id, day_id), 0)
             if current_t_load + duration > t_limit:
                 return False
                 
         dept_id, sem_id = course.department.id, course.semester.id
-        b_limit = self.batch_limits.get((dept_id, sem_id), 6)
+        b_limit = self.batch_limits.get((dept_id, sem_id), 6) + extra_limit
         
         current_b_load = self.get_batch_day_load(dept_id, sem_id, day_id, group_name)
         if current_b_load + duration > b_limit:
@@ -69,8 +72,9 @@ class ScheduleConstraint:
             
         return True
 
-    def can_schedule_continuous(self, day_id, start_idx, duration, course, group_name=None):
-        MAX_CONTINUOUS = 4
+    # [UPDATE]: Continuous limit relaxed in emergency mode
+    def can_schedule_continuous(self, day_id, start_idx, duration, course, group_name=None, is_emergency=False):
+        MAX_CONTINUOUS = 7 if is_emergency else 4
 
         b_map_key_grp = (day_id, course.department.id, course.semester.id, group_name)
         b_map_key_all = (day_id, course.department.id, course.semester.id, None)
@@ -121,11 +125,12 @@ class ScheduleConstraint:
         if constraint_type == 'CLASS_OFF': return True
         if slot.is_lunch_break and constraint_type != 'FORCE_ALLOW_LUNCH_CLASS': return True
             
-        # 100% STRICT TEACHER LOCK 
+        # 100% STRICT TEACHER LOCK (Global & Local)
         if course.teacher:
             if (day_id, slot.id, course.teacher.id) in self.teacher_occupied:
                 return True 
                     
+        # 100% STRICT ROOM LOCK (Global & Local)
         if room and (day_id, slot.id, room.id) in self.room_occupied:
             return True
             
@@ -215,13 +220,13 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
 
     config_obj = AlgorithmConfig.objects.first()
     class DefaultConfig:
-        parallel_bonus = 100000       # [UPDATE 3] Mega Magnet for perfectly parallel classes
-        edge_slot_penalty = 5000      # [UPDATE 1] Huge penalty for first & last slots
+        parallel_bonus = 100000       
+        edge_slot_penalty = 8000      
         zero_gap_bonus = 3000
         gap_penalty_per_slot = 1500
-        center_gravity_bonus = 3000   # [UPDATE 1] Pulls everyone to the middle
+        center_gravity_bonus = 3000   
         continuous_class_penalty = 500
-        day_load_penalty_multiplier = 500 # [UPDATE 2] Exponential Day Load base multiplier
+        day_load_penalty_multiplier = 500 
         
     config = config_obj if config_obj else DefaultConfig()
 
@@ -234,10 +239,12 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
         if semester_id:
             courses_to_schedule = list(base_courses.filter(semester_id=semester_id))
             old_routines = RoutineEntry.objects.filter(course__department_id=department_id, course__semester_id=semester_id)
+            # [UPDATE]: Strictly fetching Fixed classes only for the requested department & semester
             fixed_schedules = FixedClassSchedule.objects.filter(course__department_id=department_id, course__semester_id=semester_id)
         else:
             courses_to_schedule = list(base_courses)
             old_routines = RoutineEntry.objects.filter(course__department_id=department_id)
+            # [UPDATE]: Strictly fetching Fixed classes only for the requested department
             fixed_schedules = FixedClassSchedule.objects.filter(course__department_id=department_id)
 
         if old_routines.exists():
@@ -248,6 +255,7 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
             } for e in old_routines]
             RoutineBackup.objects.create(department_id=department_id, backup_data=backup_list)
 
+        # Remove the current department's old routines to make way for the new ones
         old_routines.delete()
 
         days = list(Day.objects.all().order_by('order'))
@@ -303,6 +311,10 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
             batch_totals[batch_key] = batch_totals.get(batch_key, 0) + total_credits
 
         constraints = ScheduleConstraint(days, time_slots, batch_constraints_dict, teacher_totals, batch_totals)
+        
+        # [UPDATE]: GLOBAL CONFLICT RESOLUTION
+        # Fetching all active routines across the ENTIRE university (other departments)
+        # to ensure no room or teacher overlaps globally.
         existing_routines = RoutineEntry.objects.select_related('day', 'time_slot', 'course', 'course__teacher', 'course__department', 'course__semester', 'room').filter(is_active=True)
         for r in existing_routines:
             constraints.assign(r.day, r.time_slot, r.course, r.room, r.group_name)
@@ -313,9 +325,7 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
         dropped_sessions = []
         routines_to_create = []
         
-        # ==========================================
-        # PHASE 1: ADMIN FIXED CLASSES
-        # ==========================================
+        # PHASE 1: ADMIN FIXED CLASSES (Current Department Only)
         for fs in fixed_schedules:
             course = fs.course
             day = fs.day
@@ -349,9 +359,7 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
         if fixed_routines_to_insert:
             routines_to_create.extend(fixed_routines_to_insert)
 
-        # ==========================================
         # MULTI-PHASE SESSION BUILDER
-        # ==========================================
         all_sessions = []
         for course in courses_to_schedule:
             info = course_groups_info[course.id]
@@ -400,7 +408,7 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
         total_required = scheduled_count + len(all_sessions)
 
         # ==========================================
-        # PHASED GRID SEARCH ENGINE
+        # EMERGENCY RESCUE GRID SEARCH ENGINE
         # ==========================================
         for session in all_sessions:
             course = session['course']
@@ -425,80 +433,90 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
                 )
             )
 
-            for day in sorted_days:
-                if not constraints.can_schedule_daily(day.id, course, duration, group_name): continue
-
-                b_key_grp = (day.id, course.department.id, course.semester.id, group_name)
-                b_key_all = (day.id, course.department.id, course.semester.id, None)
-                occupied_slots = constraints.batch_schedule_map.get(b_key_grp, set()).union(
-                                 constraints.batch_schedule_map.get(b_key_all, set()))
+            # [UPDATE]: Normal Mode first, if it fails, trigger Emergency Mode
+            for emergency_mode in [False, True]:
+                if best_options: break 
                 
-                for i in range(len(time_slots) - duration + 1):
-                    if not constraints.can_schedule_continuous(day.id, i, duration, course, group_name): continue
-                        
-                    window_slots = time_slots[i : i + duration]
-                    selected_room = None
+                for day in sorted_days:
+                    if not constraints.can_schedule_daily(day.id, course, duration, group_name, is_emergency=emergency_mode): continue
+
+                    b_key_grp = (day.id, course.department.id, course.semester.id, group_name)
+                    b_key_all = (day.id, course.department.id, course.semester.id, None)
+                    occupied_slots = constraints.batch_schedule_map.get(b_key_grp, set()).union(
+                                     constraints.batch_schedule_map.get(b_key_all, set()))
                     
-                    valid_rooms.sort(key=lambda r: (r.capacity, constraints.room_usage_count.get(r.id, 0)))
-                    for room in valid_rooms:
-                        if not any(constraints.is_conflict(day, w_slot, course, room, group_name) for w_slot in window_slots):
-                            selected_room = room
-                            break
+                    for i in range(len(time_slots) - duration + 1):
+                        if not constraints.can_schedule_continuous(day.id, i, duration, course, group_name, is_emergency=emergency_mode): continue
                             
-                    if not selected_room: continue
-
-                    # [UPDATE 2] Exponential Day Load Penalty (Perfect Averaging Without Dropping)
-                    current_load = constraints.get_batch_day_load(course.department.id, course.semester.id, day.id, group_name)
-                    score = -((current_load ** 2) * config.day_load_penalty_multiplier)
-
-                    # [UPDATE 1] Universal Center Gravity & Edge Penalty (Applied to ALL Phases)
-                    for w in range(i, i + duration):
-                        if w == 0 or w == total_slots - 1: 
-                            score -= config.edge_slot_penalty * 2 # First & Last slot highly discouraged
-                        elif w == 1 or w == total_slots - 2: 
-                            score -= config.edge_slot_penalty
-                        else: 
-                            score += config.center_gravity_bonus # Middle slots are best
-
-                    # [UPDATE 3] Mega Magnet for Parallel Labs
-                    if phase == 2:
-                        parallel_bonus = 0
-                        for w_slot in window_slots:
-                            check_key = (day.id, w_slot.id, course.department.id, course.semester.id)
-                            groups_here = constraints.batch_slot_groups.get(check_key, set())
-                            sibling_groups = [g for g in groups_here if g is not None and g != group_name]
-                            if sibling_groups:
-                                parallel_bonus += config.parallel_bonus # +100,000 points! 
-                        score += parallel_bonus
+                        window_slots = time_slots[i : i + duration]
+                        selected_room = None
                         
-                    # Zero-Gap / Gap Penalty Logic
-                    if occupied_slots:
-                        min_gap = float('inf')
-                        for o in occupied_slots:
-                            gap_slots = 0
-                            if o < i:
-                                for s in range(o + 1, i):
-                                    if s not in constraints.lunch_indices: gap_slots += 1
-                            else:
-                                for s in range(i + duration, o):
-                                    if s not in constraints.lunch_indices: gap_slots += 1
-                            if gap_slots < min_gap: min_gap = gap_slots
+                        valid_rooms.sort(key=lambda r: (r.capacity, constraints.room_usage_count.get(r.id, 0)))
+                        for room in valid_rooms:
+                            if not any(constraints.is_conflict(day, w_slot, course, room, group_name) for w_slot in window_slots):
+                                selected_room = room
+                                break
+                                
+                        if not selected_room: continue
+
+                        current_load = constraints.get_batch_day_load(course.department.id, course.semester.id, day.id, group_name)
+                        score = -((current_load ** 2) * config.day_load_penalty_multiplier)
                         
-                        if min_gap == 0: score += (config.zero_gap_bonus * 2) 
-                        else: score -= (min_gap * config.gap_penalty_per_slot) 
-                    else:
-                        score += config.zero_gap_bonus
+                        if emergency_mode:
+                            score -= 100000 # Apply heavy penalty to emergency so it's only used as a last resort
+
+                        if phase == 2:
+                            if "A" in group_name:
+                                if i <= 1: score += 50000 
+                                elif i >= total_slots - duration - 1: score -= 20000
+                            elif "B" in group_name:
+                                if i >= total_slots - duration - 1: score += 50000
+                                elif i <= 1: score -= 20000
+                                
+                            parallel_bonus = 0
+                            for w_slot in window_slots:
+                                check_key = (day.id, w_slot.id, course.department.id, course.semester.id)
+                                groups_here = constraints.batch_slot_groups.get(check_key, set())
+                                sibling_groups = [g for g in groups_here if g is not None and g != group_name]
+                                if sibling_groups:
+                                    parallel_bonus += config.parallel_bonus 
+                            score += parallel_bonus
                             
-                    # Continuous limit penalty
-                    left_count, right_count, l_idx, r_idx = 0, 0, i - 1, i + duration
-                    while l_idx in occupied_slots and l_idx not in constraints.lunch_indices:
-                        left_count += 1; l_idx -= 1
-                    while r_idx in occupied_slots and r_idx not in constraints.lunch_indices:
-                        right_count += 1; r_idx += 1
-                    if left_count + duration + right_count >= 3:
-                        score -= config.continuous_class_penalty 
-                    
-                    best_options.append((score, random.random(), day, window_slots, selected_room))
+                        elif phase == 3:
+                            for w in range(i, i + duration):
+                                if w == 0 or w == total_slots - 1: 
+                                    score -= config.edge_slot_penalty * 2 
+                                elif w == 1 or w == total_slots - 2: 
+                                    score -= config.edge_slot_penalty
+                                else: 
+                                    score += config.center_gravity_bonus 
+
+                        if occupied_slots:
+                            min_gap = float('inf')
+                            for o in occupied_slots:
+                                gap_slots = 0
+                                if o < i:
+                                    for s in range(o + 1, i):
+                                        if s not in constraints.lunch_indices: gap_slots += 1
+                                else:
+                                    for s in range(i + duration, o):
+                                        if s not in constraints.lunch_indices: gap_slots += 1
+                                if gap_slots < min_gap: min_gap = gap_slots
+                            
+                            if min_gap == 0: score += (config.zero_gap_bonus * 2) 
+                            else: score -= (min_gap * config.gap_penalty_per_slot) 
+                        else:
+                            score += config.zero_gap_bonus
+                                
+                        left_count, right_count, l_idx, r_idx = 0, 0, i - 1, i + duration
+                        while l_idx in occupied_slots and l_idx not in constraints.lunch_indices:
+                            left_count += 1; l_idx -= 1
+                        while r_idx in occupied_slots and r_idx not in constraints.lunch_indices:
+                            right_count += 1; r_idx += 1
+                        if left_count + duration + right_count >= 3:
+                            score -= config.continuous_class_penalty 
+                        
+                        best_options.append((score, random.random(), day, window_slots, selected_room))
             
             if best_options:
                 best_options.sort(key=lambda x: (x[0], x[1]), reverse=True)

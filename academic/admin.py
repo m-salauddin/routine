@@ -10,38 +10,19 @@ from django.shortcuts import redirect
 from django.contrib import messages
 from django.http import HttpResponseRedirect
 from django.urls import reverse
-from .models import Notice
+User = get_user_model()
+
+from .models import (
+    Day, TimeSlot, RoomType, RoomSubType, Department, 
+    Semester, Batch, Room, Course, RoutineEntry, Notice,
+    BatchTimeConstraint, SystemSetting, RoutineBackup,FixedClassSchedule
+)
+
+
 
 admin.site.register(Notice)
 
 
-from .models import (
-    Day, TimeSlot, RoomType, RoomSubType, Department, 
-    Semester, Batch, Room, Course, RoutineEntry, 
-    BatchTimeConstraint, SystemSetting, RoutineBackup,FixedClassSchedule
-)
-
-User = get_user_model()
-
-
-
-# @admin.register(FixedClassSchedule)
-# class FixedClassScheduleAdmin(admin.ModelAdmin):
-#     list_display = ('course', 'day', 'time_slot', 'room', 'group_name')
-#     list_filter = ('day', 'course__department', 'course__semester')
-#     search_fields = ('course__course_name', 'course__course_code')
-#     ordering = ('day__order', 'time_slot__start_time')
-    
-#     # Admin form fieldsets to organize the fields in the admin interface
-#     fieldsets = (
-#         ('Course & Time', {
-#             'fields': ('course', 'day', 'time_slot')
-#         }),
-#         ('Optional Settings', {
-#             'fields': ('room', 'group_name'),
-#             'classes': ('collapse',),
-#         }),
-#     )
 
 @admin.register(FixedClassSchedule)
 class FixedClassScheduleAdmin(admin.ModelAdmin):
@@ -78,7 +59,7 @@ class TimeSlotWidget(Widget):
         if not value or value == "N/A":
             return None
         try:
-            # Excel theke "14:30 - 15:20" format e data asbe
+            # Excel datae format "14:30 - 15:20" 
             start_str = str(value).split('-')[0].strip()
             start_time = datetime.datetime.strptime(start_str, '%H:%M').time()
             return TimeSlot.objects.get(start_time=start_time)
@@ -153,7 +134,7 @@ class CourseResource(resources.ModelResource):
         widget=ForeignKeyWidget(User, 'username')
     )
     
-    # UPDATE: Added Fixed Room for seamless Import/Export
+    # Added Fixed Room for seamless Import/Export
     fixed_room = fields.Field(
         column_name='fixed_room',
         attribute='fixed_room',
@@ -166,7 +147,7 @@ class CourseResource(resources.ModelResource):
         skip_unchanged = True
         report_skipped = True
         
-        # UPDATE: Explicitly defining fields to prevent import errors from old Excel sheets
+        # Explicitly defining fields to prevent import errors from old Excel sheets
         fields = (
             'id', 'course_name', 'course_code', 'department', 'semester', 
             'offering_department', 'preferred_room_department', 'teacher', 
@@ -200,7 +181,7 @@ class RoutineEntryResource(resources.ModelResource):
         widget=ForeignKeyWidget(Day, 'name') 
     )
     
-    # MAGIC: Ekhane amader notun banano TimeSlotWidget use kora hoyeche
+    
     time_slot = fields.Field(
         column_name='Time Slot',
         attribute='time_slot',
@@ -276,7 +257,7 @@ class CourseAdmin(ImportExportModelAdmin):
 
     autocomplete_fields = ('offering_department', 'preferred_room_department', 'teacher', 'fixed_room')
 
-# academic/admin.py er vitorer RoutineEntryAdmin class ti update korun
+
 
 
 @admin.register(RoutineEntry)
@@ -300,13 +281,13 @@ class RoutineEntryAdmin(ImportExportModelAdmin):
     def global_excel_export_action(self, request):
         """ Admin panel er button e click korle direct amader views er logic trigger hobe """
         from .views import SystemExcelSyncView
-        # View call kore response return kora
+        # View call kore response return 
         view_instance = SystemExcelSyncView.as_view()
-        # GET request call hobe export er jonno
+        # GET request call for export
         return view_instance(request)
 
     # --------------------------------------------------------------------------
-    # Model Display Methods (Ager motoi)
+    # Model Display Methods 
     # --------------------------------------------------------------------------
     def get_day_name(self, obj): return obj.day.name if obj.day else "N/A"
     get_day_name.short_description = 'Day'

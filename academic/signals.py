@@ -2,7 +2,6 @@
 from django.db.models.signals import post_save
 from django.dispatch import receiver
 from .models import TemporarySwapRequest, ActivityLog
-# Notification ইমপোর্ট করার দরকার নেই, কারণ এটি এখন views.py থেকে যাচ্ছে
 
 @receiver(post_save, sender=TemporarySwapRequest)
 def handle_swap_events(sender, instance, created, **kwargs):

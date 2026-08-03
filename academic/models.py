@@ -3,6 +3,7 @@ from django.db import models
 from django.conf import settings
 
 
+
 # ==============================================================================
 # 0. MASTER BASE MODEL (For Audit Trails & Soft Delete)
 # ==============================================================================
@@ -62,7 +63,7 @@ class Semester(TimeStampedModel):
     order = models.PositiveIntegerField(unique=True)
     def __str__(self): return self.name
 
-# --- NEW: BATCH MODEL FOR ALUMNI & LIFECYCLE MANAGEMENT ---
+# BATCH MODEL FOR ALUMNI & LIFECYCLE MANAGEMENT 
 class Batch(TimeStampedModel):
     STATUS_CHOICES = (
         ('ACTIVE', 'Active (Currently Studying)'),
@@ -75,7 +76,6 @@ class Batch(TimeStampedModel):
 
     class Meta:
         verbose_name_plural = "Batches"
-        # [NEW] এই লাইনের কারণে একই ডিপার্টমেন্টে একই নামের ব্যাচ দুইবার তৈরি করা যাবে না
         unique_together = ('name', 'department') 
 
     def __str__(self):
@@ -131,7 +131,7 @@ class Course(TimeStampedModel):
     department = models.ForeignKey(Department, related_name='targeted_courses', on_delete=models.CASCADE)
     semester = models.ForeignKey(Semester, on_delete=models.CASCADE)
     
-    # --- NEW CROSS-DEPARTMENT FIELDS ---
+    # CROSS-DEPARTMENT FIELDS ---
     # Offering: The department that teaches it (e.g., Math Dept)
     offering_department = models.ForeignKey(
         Department, related_name='offered_courses', on_delete=models.SET_NULL, null=True, blank=True,
@@ -154,7 +154,6 @@ class Course(TimeStampedModel):
     course_sub_type = models.ForeignKey(RoomSubType, on_delete=models.SET_NULL, null=True, blank=True)
 
     # Fixed Routine Constraints
-    # UPDATE: Removed fixed_day and fixed_time_slot. Only fixed_room remains.
     fixed_room = models.ForeignKey(
         Room, on_delete=models.SET_NULL, null=True, blank=True,
         help_text="Force the algorithm to always use this specific room for all classes of this course."
@@ -201,13 +200,11 @@ class RoutineEntry(TimeStampedModel):
         if not self.course_id or not self.day_id or not self.time_slot_id:
             return
 
-        # ওই দিনের এবং ওই স্লটের আগের সব ক্লাস ফিল্টার করা হচ্ছে (নিজে ছাড়া)
+     
         qs = RoutineEntry.objects.filter(day=self.day, time_slot=self.time_slot)
         if self.pk:
             qs = qs.exclude(pk=self.pk)
 
-        # 🚨 ১. হার্ড টিচার কনস্ট্রেইন্ট (Strict Teacher Lock)
-        # একজন টিচার একই সময়ে কখনোই দুই রুমে থাকতে পারবেন না (তা সে একই কোর্সের গ্রুপ ল্যাব হলেও)
         if self.course.teacher:
             teacher_clash = qs.filter(course__teacher=self.course.teacher)
             if teacher_clash.exists():
@@ -216,32 +213,29 @@ class RoutineEntry(TimeStampedModel):
                     'course': f"Teacher {self.course.teacher} is already scheduled for '{clashed_class.course.course_code}' in Room {clashed_class.room} at this time."
                 })
 
-        # 🚨 ২. হার্ড ব্যাচ এবং গ্রুপ কনস্ট্রেইন্ট (Strict Batch & Group Lock)
-        # একই সেমিস্টার ও ডিপার্টমেন্টের স্টুডেন্টদের ক্লাস ওভারল্যাপ চেক
+
         batch_clash = qs.filter(
             course__department=self.course.department,
             course__semester=self.course.semester
         )
         
         for entry in batch_clash:
-            # ক. যদি দুই ক্লাসের কোনোটিতেই গ্রুপ না থাকে (দুটিই কম্বাইন্ড ক্লাস)
+
             if not self.group_name and not entry.group_name:
                 raise ValidationError(f"This batch already has a combined class ({entry.course.course_code}) at this time.")
             
-            # খ. নতুন ক্লাসটি কম্বাইন্ড, কিন্তু ওই সময়ে অলরেডি একটি গ্রুপের ক্লাস আছে
+
             if not self.group_name and entry.group_name:
                 raise ValidationError(f"Cannot schedule a combined class. This batch already has a class for {entry.group_name} ({entry.course.course_code}) at this time.")
             
-            # গ. ওই সময়ে একটি কম্বাইন্ড ক্লাস আছে, কিন্তু এখন একটি গ্রুপের ক্লাস ঢোকানোর চেষ্টা করা হচ্ছে
             if self.group_name and not entry.group_name:
                 raise ValidationError(f"Cannot schedule for {self.group_name}. This batch already has a combined class ({entry.course.course_code}) at this time.")
                 
-            # ঘ. দুটি ক্লাসেরই গ্রুপ আছে, কিন্তু গ্রুপ দুটি একই (যেমন: Group A এর একই সময়ে দুই ল্যাব)
             if self.group_name and entry.group_name and self.group_name == entry.group_name:
                 raise ValidationError(f"{self.group_name} already has a class ({entry.course.course_code}) at this time.")
 
     def save(self, *args, **kwargs):
-        # সেভ করার আগে বাধ্যতামূলকভাবে clean() মেথড কল হবে
+
         self.clean()
         super().save(*args, **kwargs)
 
@@ -270,7 +264,7 @@ class BatchTimeConstraint(TimeStampedModel):
     department = models.ForeignKey(Department, on_delete=models.CASCADE)
     semester = models.ForeignKey(Semester, on_delete=models.CASCADE)
     
-    # NEW: Link specifically to a Batch (Optional, for batch-specific blocks)
+    # Link specifically to a Batch (Optional, for batch-specific blocks)
     batch = models.ForeignKey(Batch, on_delete=models.CASCADE, null=True, blank=True, help_text="Optional: Apply only to a specific batch")
     
     day = models.ForeignKey(Day, on_delete=models.CASCADE)
@@ -305,7 +299,6 @@ class RoutineBackup(models.Model):
         return f"Backup: {self.department.name} | {self.created_at}"
     
 
-# academic/models.py (Add at the bottom)
 
 class SystemBackup(models.Model):
     name = models.CharField(max_length=255, help_text="Backup er ekta nam din (e.g., Before Midterm)")
@@ -372,8 +365,6 @@ class TemporarySwapRequest(TimeStampedModel):
 # ==============================================================================
 
 
-
-
 class Notice(TimeStampedModel):
     NOTICE_TYPES = (
         ('GLOBAL', 'Global Notice (All Users)'),
@@ -428,63 +419,6 @@ class Notification(TimeStampedModel):
 
     def __str__(self):
         return f"To {self.recipient.username} - {self.title} [Read: {self.is_read}]"
-# #academic/models.py
-# class Notice(TimeStampedModel):
-#     NOTICE_TYPES = (
-#         ('GLOBAL', 'Global Notice (All Users)'),
-#         ('TARGETED', 'Targeted Notice (Specific Dept/Semester/Batch)'),
-#     )
-    
-#     sender = models.ForeignKey(settings.AUTH_USER_MODEL, related_name='sent_notices', on_delete=models.CASCADE)
-#     notice_type = models.CharField(max_length=20, choices=NOTICE_TYPES, default='TARGETED')
-#     title = models.CharField(max_length=255)
-#     message = models.TextField()
-    
-#     # Target Audience (M2M fields)
-#     target_departments = models.ManyToManyField('Department', blank=True, related_name='notices')
-#     target_semesters = models.ManyToManyField('Semester', blank=True, related_name='notices')
-#     target_batches = models.ManyToManyField('Batch', blank=True, related_name='notices') # [NEW] ব্যাচ টার্গেট করার জন্য
-    
-#     class Meta:
-#         ordering = ['-created_at']
-
-#     def __str__(self):
-#         return f"{self.notice_type} - {self.title} by {self.sender.username}"
-
-
-# class Notification(TimeStampedModel):
-#     NOTIFICATION_TYPES = (
-#         ('SWAP_REQ', 'Swap Request Received'),
-#         ('SWAP_ACC', 'Swap Request Accepted'),
-#         ('SWAP_REJ', 'Swap Request Rejected'),
-#         ('CLASS_DEL', 'Class Cancelled'),
-#         ('ADMIN_MSG', 'Admin Message'),
-#         ('NOTICE', 'System Notice'), 
-#     )
-
-#     recipient = models.ForeignKey(settings.AUTH_USER_MODEL, related_name='notifications', on_delete=models.CASCADE)
-#     sender = models.ForeignKey(
-#         settings.AUTH_USER_MODEL, related_name='sent_notifications', 
-#         on_delete=models.SET_NULL, null=True, blank=True
-#     )
-    
-    
-#     related_notice = models.ForeignKey(Notice, on_delete=models.CASCADE, null=True, blank=True, related_name='generated_notifications')
-    
-#     notification_type = models.CharField(max_length=20, choices=NOTIFICATION_TYPES)
-#     title = models.CharField(max_length=255)
-#     message = models.TextField()
-#     action_url = models.CharField(
-#         max_length=255, null=True, blank=True, 
-#         help_text="Frontend URL to redirect when user clicks the notification"
-#     )
-#     is_read = models.BooleanField(default=False)
-
-#     class Meta:
-#         ordering = ['-created_at']
-
-#     def __str__(self):
-#         return f"To {self.recipient.username} - {self.title} [Read: {self.is_read}]"
 
 
 
@@ -495,10 +429,10 @@ class Notification(TimeStampedModel):
 # ==============================================================================
 class ActivityLog(models.Model):
     SEVERITY_CHOICES = (
-        ('INFO', 'Information'),       # General actions (e.g., Logins, viewing)
-        ('SUCCESS', 'Success'),        # Positive actions (e.g., Swap accepted)
-        ('WARNING', 'Warning'),        # Cautious actions (e.g., Class cancelled)
-        ('DANGER', 'Danger'),          # Critical actions (e.g., Deletions, Reset)
+        ('INFO', 'Information'),       
+        ('SUCCESS', 'Success'),       
+        ('WARNING', 'Warning'),        
+        ('DANGER', 'Danger'),          
     )
 
     # who performed the action (e.g., admin, teacher)
@@ -530,10 +464,6 @@ class ActivityLog(models.Model):
         return f"[{self.severity}] {actor_name}: {self.action_description}"
     
 
-
-
-# academic/models.py
-from django.db import models
 
 
 class AlgorithmConfig(models.Model):
