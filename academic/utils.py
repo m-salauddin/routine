@@ -53,9 +53,8 @@ class ScheduleConstraint:
                     max_group_load = v
         return common_load + max_group_load
 
-    # [UPDATE]: Emergency mode added to prevent dropping classes
     def can_schedule_daily(self, day_id, course, duration, group_name=None, is_emergency=False):
-        extra_limit = 3 if is_emergency else 0
+        extra_limit = 2 if is_emergency else 0
         
         if course.teacher:
             t_limit = self.teacher_limits.get(course.teacher.id, 4) + extra_limit
@@ -72,9 +71,8 @@ class ScheduleConstraint:
             
         return True
 
-    # [UPDATE]: Continuous limit relaxed in emergency mode
     def can_schedule_continuous(self, day_id, start_idx, duration, course, group_name=None, is_emergency=False):
-        MAX_CONTINUOUS = 7 if is_emergency else 4
+        MAX_CONTINUOUS = 5 if is_emergency else 3
 
         b_map_key_grp = (day_id, course.department.id, course.semester.id, group_name)
         b_map_key_all = (day_id, course.department.id, course.semester.id, None)
@@ -125,12 +123,10 @@ class ScheduleConstraint:
         if constraint_type == 'CLASS_OFF': return True
         if slot.is_lunch_break and constraint_type != 'FORCE_ALLOW_LUNCH_CLASS': return True
             
-        # 100% STRICT TEACHER LOCK (Global & Local)
         if course.teacher:
             if (day_id, slot.id, course.teacher.id) in self.teacher_occupied:
                 return True 
                     
-        # 100% STRICT ROOM LOCK (Global & Local)
         if room and (day_id, slot.id, room.id) in self.room_occupied:
             return True
             
@@ -221,12 +217,12 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
     config_obj = AlgorithmConfig.objects.first()
     class DefaultConfig:
         parallel_bonus = 100000       
-        edge_slot_penalty = 8000      
-        zero_gap_bonus = 3000
-        gap_penalty_per_slot = 1500
-        center_gravity_bonus = 3000   
-        continuous_class_penalty = 500
-        day_load_penalty_multiplier = 500 
+        edge_slot_penalty = 15000      
+        zero_gap_bonus = 8000
+        gap_penalty_per_slot = 15000
+        center_gravity_bonus = 5000   
+        continuous_class_penalty = 8000
+        day_load_penalty_multiplier = 2500 
         
     config = config_obj if config_obj else DefaultConfig()
 
@@ -239,12 +235,10 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
         if semester_id:
             courses_to_schedule = list(base_courses.filter(semester_id=semester_id))
             old_routines = RoutineEntry.objects.filter(course__department_id=department_id, course__semester_id=semester_id)
-            # [UPDATE]: Strictly fetching Fixed classes only for the requested department & semester
             fixed_schedules = FixedClassSchedule.objects.filter(course__department_id=department_id, course__semester_id=semester_id)
         else:
             courses_to_schedule = list(base_courses)
             old_routines = RoutineEntry.objects.filter(course__department_id=department_id)
-            # [UPDATE]: Strictly fetching Fixed classes only for the requested department
             fixed_schedules = FixedClassSchedule.objects.filter(course__department_id=department_id)
 
         if old_routines.exists():
@@ -255,7 +249,6 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
             } for e in old_routines]
             RoutineBackup.objects.create(department_id=department_id, backup_data=backup_list)
 
-        # Remove the current department's old routines to make way for the new ones
         old_routines.delete()
 
         days = list(Day.objects.all().order_by('order'))
@@ -312,9 +305,6 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
 
         constraints = ScheduleConstraint(days, time_slots, batch_constraints_dict, teacher_totals, batch_totals)
         
-        # [UPDATE]: GLOBAL CONFLICT RESOLUTION
-        # Fetching all active routines across the ENTIRE university (other departments)
-        # to ensure no room or teacher overlaps globally.
         existing_routines = RoutineEntry.objects.select_related('day', 'time_slot', 'course', 'course__teacher', 'course__department', 'course__semester', 'room').filter(is_active=True)
         for r in existing_routines:
             constraints.assign(r.day, r.time_slot, r.course, r.room, r.group_name)
@@ -325,7 +315,6 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
         dropped_sessions = []
         routines_to_create = []
         
-        # PHASE 1: ADMIN FIXED CLASSES (Current Department Only)
         for fs in fixed_schedules:
             course = fs.course
             day = fs.day
@@ -359,7 +348,6 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
         if fixed_routines_to_insert:
             routines_to_create.extend(fixed_routines_to_insert)
 
-        # MULTI-PHASE SESSION BUILDER
         all_sessions = []
         for course in courses_to_schedule:
             info = course_groups_info[course.id]
@@ -407,9 +395,6 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
         
         total_required = scheduled_count + len(all_sessions)
 
-        # ==========================================
-        # EMERGENCY RESCUE GRID SEARCH ENGINE
-        # ==========================================
         for session in all_sessions:
             course = session['course']
             duration = session['duration']
@@ -433,7 +418,6 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
                 )
             )
 
-            # [UPDATE]: Normal Mode first, if it fails, trigger Emergency Mode
             for emergency_mode in [False, True]:
                 if best_options: break 
                 
@@ -463,7 +447,7 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
                         score = -((current_load ** 2) * config.day_load_penalty_multiplier)
                         
                         if emergency_mode:
-                            score -= 100000 # Apply heavy penalty to emergency so it's only used as a last resort
+                            score -= 100000 
 
                         if phase == 2:
                             if "A" in group_name:
@@ -533,7 +517,6 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
                 grp_str = f" ({group_name})" if group_name else ""
                 dropped_sessions.append(f"Dropped: {course.course_code}{grp_str} (Limit Reached or No Valid Slot)")
 
-        # FINAL SAFE SAVING
         if routines_to_create:
             try:
                 for entry in routines_to_create:
