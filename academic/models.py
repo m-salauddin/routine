@@ -468,6 +468,16 @@ class ActivityLog(models.Model):
 
 class AlgorithmConfig(models.Model):
 
+    gap_square_penalty = models.IntegerField(
+        default=800,
+        help_text="Penalty multiplier for squared gap size. Larger gaps become extremely unattractive. (Low: 100 | Mid: 500 | High: 1000+)"
+    )
+    
+    adjacent_cluster_bonus = models.IntegerField(
+        default=5000,
+        help_text="Bonus when a class is placed immediately before or after an existing class of the same batch. (Low: 1000 | Mid: 5000 | High: 10000)"
+    )
+
     load_balance_factor = models.IntegerField(
         default=20000,
         help_text="Daily load balancing factor. Bonus when load is below ideal, penalty when above. Higher value = stronger balancing."
@@ -477,25 +487,25 @@ class AlgorithmConfig(models.Model):
     lab_slots_per_credit = models.IntegerField(
         default=1,
         help_text="প্রতি ক্রেডিটে ল্যাবের জন্য কতটি স্লট বরাদ্দ হবে (ডিফল্ট: 1, অর্থাৎ 1 ক্রেডিট = 1 স্লট)"    
-        )
+    )
     lab_force_pair = models.BooleanField(
         default=True,
         help_text="True হলে ল্যাবের প্রতিটি সেশন জোড়া (2 স্লট একসাথে) হবে, False হলে প্রতি সেশন 1 স্লট হবে"
-        )
+    )
     max_parallel_lab_groups = models.IntegerField(
         default=2,
         help_text="সর্বোচ্চ কতটি ল্যাব গ্রুপ একই সময়ে (একই স্লটে) সমান্তরালে চলতে পারবে"
-        )
+    )
 
     break_after_block_bonus = models.IntegerField(
         default=20000, 
         help_text="Bonus for scheduling a break after a block of consecutive classes. (Low: 1000 | Mid: 5000 | High: 20000+). A higher value encourages the algorithm to insert breaks after long blocks of classes."
-        )
+    )
     
     ideal_load_deviation_penalty = models.IntegerField(
         default=5000, 
         help_text="Penalty for deviating from the ideal number of classes per day. (Low: 500 | Mid: 2000 | High: 5000+). A higher value encourages the algorithm to balance the number of classes across days."
-        )
+    )
     
     # [Parallel Classes]
     parallel_bonus = models.IntegerField(
