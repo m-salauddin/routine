@@ -468,6 +468,12 @@ class ActivityLog(models.Model):
 
 class AlgorithmConfig(models.Model):
 
+    load_balance_factor = models.IntegerField(
+        default=20000,
+        help_text="Daily load balancing factor. Bonus when load is below ideal, penalty when above. Higher value = stronger balancing."
+    )
+
+
     lab_slots_per_credit = models.IntegerField(
         default=1,
         help_text="প্রতি ক্রেডিটে ল্যাবের জন্য কতটি স্লট বরাদ্দ হবে (ডিফল্ট: 1, অর্থাৎ 1 ক্রেডিট = 1 স্লট)"    

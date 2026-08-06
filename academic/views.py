@@ -53,40 +53,128 @@ RESOURCE_MAP = {
 }
 
 
-class FixedClassScheduleListCreateView(APIView):
-    permission_classes = [IsAuthenticated]
+# class FixedClassScheduleListCreateView(APIView):
+#     permission_classes = [IsAuthenticated]
 
-    def is_admin(self, user):
-        return getattr(user, 'role', '') == 'ADMIN' or user.is_staff
+#     def is_admin(self, user):
+#         return getattr(user, 'role', '') == 'ADMIN' or user.is_staff
 
-    @swagger_auto_schema(
-        tags=['4. Admin Operations'],
-        operation_description="**[ADMIN ONLY]** Get all fixed class schedules.",
-        responses={200: FixedClassScheduleSerializer(many=True)}
-    )
-    def get(self, request):
-        if not self.is_admin(request.user):
-            return Response({"error": "Only admins can access this API."}, status=status.HTTP_403_FORBIDDEN)
+#     @swagger_auto_schema(
+#         tags=['4. Admin Operations'],
+#         operation_description="**[ADMIN ONLY]** Get all fixed class schedules.",
+#         responses={200: FixedClassScheduleSerializer(many=True)}
+#     )
+#     def get(self, request):
+#         if not self.is_admin(request.user):
+#             return Response({"error": "Only admins can access this API."}, status=status.HTTP_403_FORBIDDEN)
         
-        schedules = FixedClassSchedule.objects.all()
-        serializer = FixedClassScheduleSerializer(schedules, many=True)
-        return Response({"status": "success", "data": serializer.data}, status=status.HTTP_200_OK)
+#         schedules = FixedClassSchedule.objects.all()
+#         serializer = FixedClassScheduleSerializer(schedules, many=True)
+#         return Response({"status": "success", "data": serializer.data}, status=status.HTTP_200_OK)
 
-    @swagger_auto_schema(
-        tags=['4. Admin Operations'],
-        operation_description="**[ADMIN ONLY]** Create a new fixed class schedule.",
-        request_body=FixedClassScheduleSerializer,
-        responses={201: "Created Successfully", 400: "Bad Request"}
-    )
+#     @swagger_auto_schema(
+#         tags=['4. Admin Operations'],
+#         operation_description="**[ADMIN ONLY]** Create a new fixed class schedule.",
+#         request_body=FixedClassScheduleSerializer,
+#         responses={201: "Created Successfully", 400: "Bad Request"}
+#     )
+#     def post(self, request):
+#         if not self.is_admin(request.user):
+#             return Response({"error": "Only admins can perform this action."}, status=status.HTTP_403_FORBIDDEN)
+        
+#         serializer = FixedClassScheduleSerializer(data=request.data)
+#         if serializer.is_valid():
+#             serializer.save()
+#             return Response({"status": "success", "message": "Fixed class scheduled successfully!", "data": serializer.data}, status=status.HTTP_201_CREATED)
+#         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+
+
+
+class FixedClassScheduleListCreateView(APIView):
+    # get মেথড আগের মতো থাকবে
+    ...
+
     def post(self, request):
         if not self.is_admin(request.user):
             return Response({"error": "Only admins can perform this action."}, status=status.HTTP_403_FORBIDDEN)
         
+        # ডাটা ভ্যালিডেশন
+        course_id = request.data.get('course')
+        day_id = request.data.get('day')
+        time_slot_id = request.data.get('time_slot')
+        room_id = request.data.get('room')
+        group_name = request.data.get('group_name')
+
+        if not all([course_id, day_id, time_slot_id]):
+            return Response({"error": "course, day, and time_slot are required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        # কোর্স, ডে, স্লট অবজেক্ট
+        try:
+            course = Course.objects.get(id=course_id, is_active=True)
+            day = Day.objects.get(id=day_id)
+            time_slot = TimeSlot.objects.get(id=time_slot_id)
+        except (Course.DoesNotExist, Day.DoesNotExist, TimeSlot.DoesNotExist):
+            return Response({"error": "Invalid course, day, or time slot."}, status=status.HTTP_400_BAD_REQUEST)
+
+        # 1. ইতোমধ্যে একই দিন-টাইমে একই কোর্সের ফিক্সড শিডিউল আছে কিনা (unique_together এর বাইরেও)
+        if FixedClassSchedule.objects.filter(day=day, time_slot=time_slot, course=course, group_name=group_name).exists():
+            return Response({"error": "A fixed schedule already exists for this course at this day and time."}, status=status.HTTP_409_CONFLICT)
+
+        # 2. ব্যাচ কনফ্লিক্ট: একই স্লটে একই ব্যাচের অন্য ফিক্সড বা রুটিন এন্ট্রি আছে কিনা
+        dept = course.department
+        sem = course.semester
+        # ফিক্সড
+        batch_fixed_conflict = FixedClassSchedule.objects.filter(
+            day=day, time_slot=time_slot,
+            course__department=dept, course__semester=sem
+        ).exclude(course=course)  # নিজের কোর্স ছাড়া
+        if batch_fixed_conflict.exists():
+            return Response({"error": "Batch conflict: Another fixed class exists for this batch at the same time."}, status=status.HTTP_409_CONFLICT)
+        # রুটিন এন্ট্রি
+        batch_routine_conflict = RoutineEntry.objects.filter(
+            day=day, time_slot=time_slot,
+            course__department=dept, course__semester=sem,
+            is_active=True, is_cancelled=False
+        ).exclude(course=course)
+        if batch_routine_conflict.exists():
+            return Response({"error": "Batch conflict: An existing routine class exists for this batch at the same time."}, status=status.HTTP_409_CONFLICT)
+
+        # 3. টিচার কনফ্লিক্ট
+        teacher = course.teacher
+        if teacher:
+            teacher_fixed_conflict = FixedClassSchedule.objects.filter(
+                day=day, time_slot=time_slot,
+                course__teacher=teacher
+            ).exclude(course=course)
+            if teacher_fixed_conflict.exists():
+                return Response({"error": f"Teacher {teacher.username} already has a fixed class at this time."}, status=status.HTTP_409_CONFLICT)
+            teacher_routine_conflict = RoutineEntry.objects.filter(
+                day=day, time_slot=time_slot,
+                course__teacher=teacher, is_active=True, is_cancelled=False
+            ).exclude(course=course)
+            if teacher_routine_conflict.exists():
+                return Response({"error": f"Teacher {teacher.username} already has a class at this time."}, status=status.HTTP_409_CONFLICT)
+
+        # 4. রুম কনফ্লিক্ট (যদি রুম দেওয়া থাকে)
+        if room_id:
+            try:
+                room = Room.objects.get(id=room_id, is_active=True)
+            except Room.DoesNotExist:
+                return Response({"error": "Room not found or inactive."}, status=status.HTTP_400_BAD_REQUEST)
+            room_fixed_conflict = FixedClassSchedule.objects.filter(day=day, time_slot=time_slot, room=room)
+            room_routine_conflict = RoutineEntry.objects.filter(day=day, time_slot=time_slot, room=room, is_active=True, is_cancelled=False)
+            if room_fixed_conflict.exists() or room_routine_conflict.exists():
+                return Response({"error": f"Room {room.room_number} is already occupied at this time."}, status=status.HTTP_409_CONFLICT)
+
+        # সব ঠিক থাকলে সেভ
         serializer = FixedClassScheduleSerializer(data=request.data)
         if serializer.is_valid():
             serializer.save()
             return Response({"status": "success", "message": "Fixed class scheduled successfully!", "data": serializer.data}, status=status.HTTP_201_CREATED)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
 
 
 class FixedClassScheduleDetailView(APIView):
