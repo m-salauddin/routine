@@ -10,22 +10,22 @@ from .models import (
 )
 
 class ScheduleConstraint:
+    # (আগের মতো সব কিছুই আছে, কোনো পরিবর্তন নেই)
     def __init__(self, days, time_slots, batch_constraints_dict, teacher_totals, batch_totals):
-        self.teacher_occupied = {}          # (day_id, slot_id, teacher_id) -> course_id
-        self.room_occupied = set()          # (day_id, slot_id, room_id)
-        self.course_daily_tracker = set()   # (course_id, group_name, day_id)
-        self.batch_slot_groups = {}         # (day_id, slot_id, dept_id, sem_id) -> set of group_name
+        self.teacher_occupied = {}
+        self.room_occupied = set()
+        self.course_daily_tracker = set()
+        self.batch_slot_groups = {}
 
         self.day_loads = {day.id: 0 for day in days}
-        self.teacher_daily_count = {}       # (teacher_id, day_id) -> total slots
-        self.batch_daily_count = {}         # (dept_id, sem_id, day_id, group_name) -> slots
-        self.room_usage_count = {}          # room_id -> total assignments
+        self.teacher_daily_count = {}
+        self.batch_daily_count = {}
+        self.room_usage_count = {}
 
         self.batch_constraints = batch_constraints_dict
         self.lunch_indices = {idx for idx, slot in enumerate(time_slots) if slot.is_lunch_break}
         self.total_days = max(1, len(days))
 
-        # শিক্ষক/ব্যাচের দৈনিক সর্বোচ্চ স্লট: গড় + ১
         self.teacher_limits = {
             tid: math.ceil(total / self.total_days) + 1
             for tid, total in teacher_totals.items()
@@ -36,11 +36,10 @@ class ScheduleConstraint:
         }
 
         self.slot_index_map = {slot.id: idx for idx, slot in enumerate(time_slots)}
-        self.teacher_schedule_map = {}   # (day_id, teacher_id) -> set of slot indices
-        self.batch_schedule_map = {}     # (day_id, dept_id, sem_id, group_name) -> set of slot indices
+        self.teacher_schedule_map = {}
+        self.batch_schedule_map = {}
 
     def get_batch_day_load(self, dept_id, sem_id, day_id, group_name=None):
-        """সংশোধিত: common লেকচারের লোডে গ্রুপের লোড আর যোগ হবে না।"""
         common_load = self.batch_daily_count.get((dept_id, sem_id, day_id, None), 0)
         if group_name:
             group_load = self.batch_daily_count.get((dept_id, sem_id, day_id, group_name), 0)
@@ -49,31 +48,24 @@ class ScheduleConstraint:
 
     def can_schedule_daily(self, day_id, course, duration, group_name=None, is_emergency=False):
         extra_limit = 2 if is_emergency else 0
-
-        # শিক্ষক দৈনিক সীমা
         if course.teacher:
             t_limit = self.teacher_limits.get(course.teacher.id, 5) + extra_limit
             current_t = self.teacher_daily_count.get((course.teacher.id, day_id), 0)
             if current_t + duration > t_limit:
                 return False
-
-        # ব্যাচ দৈনিক সীমা
         dept_id, sem_id = course.department.id, course.semester.id
         b_limit = self.batch_limits.get((dept_id, sem_id), 6) + extra_limit
         current_b = self.get_batch_day_load(dept_id, sem_id, day_id, group_name)
         if current_b + duration > b_limit:
             return False
-
         return True
 
     def can_schedule_continuous(self, day_id, start_idx, duration, course, group_name=None, is_emergency=False):
         MAX_CONTINUOUS = 4 if is_emergency else 3
-
         b_map_key_grp = (day_id, course.department.id, course.semester.id, group_name)
         b_map_key_all = (day_id, course.department.id, course.semester.id, None)
         batch_occupied = self.batch_schedule_map.get(b_map_key_grp, set()).union(
                          self.batch_schedule_map.get(b_map_key_all, set()))
-
         left_count = 0
         left_idx = start_idx - 1
         while left_idx in batch_occupied and left_idx not in self.lunch_indices:
@@ -84,10 +76,8 @@ class ScheduleConstraint:
         while right_idx in batch_occupied and right_idx not in self.lunch_indices:
             right_count += 1
             right_idx += 1
-
         if left_count + duration + right_count > MAX_CONTINUOUS:
             return False
-
         if course.teacher:
             teacher_key = (day_id, course.teacher.id)
             teacher_occupied = self.teacher_schedule_map.get(teacher_key, set())
@@ -103,7 +93,6 @@ class ScheduleConstraint:
                 right_idx += 1
             if left_count + duration + right_count > MAX_CONTINUOUS:
                 return False
-
         return True
 
     def is_conflict(self, day, slot, course, room, group_name=None, is_fixed=False):
@@ -111,34 +100,24 @@ class ScheduleConstraint:
         constraint_type = self.batch_constraints.get((course.department.id, course.semester.id, day_id, slot.id))
         if constraint_type == 'CLASS_OFF': return True
         if slot.is_lunch_break and constraint_type != 'FORCE_ALLOW_LUNCH_CLASS': return True
-
-        # শিক্ষক কনফ্লিক্ট (স্লটে)
         if course.teacher and (day_id, slot.id, course.teacher.id) in self.teacher_occupied:
             return True
-
-        # রুম কনফ্লিক্ট
         if room and (day_id, slot.id, room.id) in self.room_occupied:
             return True
-
-        # ব্যাচ-স্লট-গ্রুপ কনফ্লিক্ট
         b_key = (day_id, slot.id, course.department.id, course.semester.id)
         if b_key in self.batch_slot_groups:
             occupied_groups = self.batch_slot_groups[b_key]
             if None in occupied_groups: return True
             if group_name is None and len(occupied_groups) > 0: return True
             if group_name in occupied_groups: return True
-
-        # একই দিনে একই কোর্স+গ্রুপ একবারের বেশি নয় (নন-ল্যাব)
         is_lab = course.course_type and 'lab' in course.course_type.name.lower()
         if not is_fixed and not is_lab and (course.id, group_name, day_id) in self.course_daily_tracker:
             return True
-
         return False
 
     def assign(self, day, slot, course, room, group_name=None):
         day_id = day.id
         slot_idx = self.slot_index_map[slot.id]
-
         if course.teacher:
             self.teacher_occupied[(day_id, slot.id, course.teacher.id)] = course.id
             self.teacher_daily_count[(course.teacher.id, day_id)] = self.teacher_daily_count.get((course.teacher.id, day_id), 0) + 1
@@ -146,22 +125,17 @@ class ScheduleConstraint:
             if sched_key not in self.teacher_schedule_map:
                 self.teacher_schedule_map[sched_key] = set()
             self.teacher_schedule_map[sched_key].add(slot_idx)
-
         if room:
             self.room_occupied.add((day_id, slot.id, room.id))
             self.room_usage_count[room.id] = self.room_usage_count.get(room.id, 0) + 1
-
         b_key_groups = (day_id, slot.id, course.department.id, course.semester.id)
         if b_key_groups not in self.batch_slot_groups:
             self.batch_slot_groups[b_key_groups] = set()
         self.batch_slot_groups[b_key_groups].add(group_name)
-
         self.course_daily_tracker.add((course.id, group_name, day_id))
         self.day_loads[day_id] += 1
-
         b_key = (course.department.id, course.semester.id, day_id, group_name)
         self.batch_daily_count[b_key] = self.batch_daily_count.get(b_key, 0) + 1
-
         b_map_key = (day_id, course.department.id, course.semester.id, group_name)
         if b_map_key not in self.batch_schedule_map:
             self.batch_schedule_map[b_map_key] = set()
@@ -171,7 +145,6 @@ class ScheduleConstraint:
 def get_valid_rooms_for_course(course, all_active_rooms, is_lab, required_capacity=None):
     if course.fixed_room and course.fixed_room.is_active:
         return [course.fixed_room]
-
     base_matching_rooms = [
         r for r in all_active_rooms
         if r.room_type_id == course.course_type_id
@@ -181,11 +154,9 @@ def get_valid_rooms_for_course(course, all_active_rooms, is_lab, required_capaci
     valid_rooms = [r for r in base_matching_rooms if r.department_id == dept_to_search.id]
     if not valid_rooms:
         return []
-
     if required_capacity is None:
         valid_rooms.sort(key=lambda x: x.capacity, reverse=True)
         return valid_rooms
-
     rooms_fitting = [r for r in valid_rooms if r.capacity >= required_capacity]
     rooms_fitting.sort(key=lambda x: x.capacity)
     return rooms_fitting
@@ -198,15 +169,19 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
 
     config_obj = AlgorithmConfig.objects.first()
     class DefaultConfig:
-        parallel_bonus = 100000
-        edge_slot_penalty = 12000
-        zero_gap_bonus = 10000
-        gap_penalty_per_slot = 12000
-        center_gravity_bonus = 5000
-        continuous_class_penalty = 15000
-        day_load_penalty_multiplier = 3000
+        parallel_bonus = 50000
+        edge_slot_penalty = 2000
+        zero_gap_bonus = 1000
+        gap_penalty_per_slot = 500
+        center_gravity_bonus = 50
+        continuous_class_penalty = 100
+        day_load_penalty_multiplier = 150
         break_after_block_bonus = 20000
         ideal_load_deviation_penalty = 5000
+        # নতুন ফিল্ডের ডিফল্ট
+        lab_slots_per_credit = 2
+        lab_force_pair = True
+        max_parallel_lab_groups = 2
     config = config_obj if config_obj else DefaultConfig()
 
     # ---------- ডাটা প্রস্তুতি ----------
@@ -224,7 +199,7 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
         old_routines = RoutineEntry.objects.filter(course__department_id=department_id)
         fixed_schedules = FixedClassSchedule.objects.filter(course__department_id=department_id)
 
-    # ব্যাকআপ ট্রানজেকশনের বাইরে রাখুন (রোলব্যাকেও টিকে থাকবে)
+    # ব্যাকআপ ট্রানজেকশনের বাইরে
     if old_routines.exists():
         backup_list = [{
             'day_id': e.day_id, 'time_slot_id': e.time_slot_id,
@@ -277,14 +252,23 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
                 'is_lab': is_lab
             }
 
-            total_credits = course.credits * len(groups)
+            # teacher_totals ও batch_totals হিসেবের সময় এখন সেশন সংখ্যা (স্লট সংখ্যা নয়) দিয়ে গুণ করতে হবে
+            # কারণ ল্যাবের মোট স্লট হিসেব এখন কনফিগ থেকে নেওয়া
+            if is_lab:
+                session_duration = 2 if config.lab_force_pair else 1
+                total_lab_slots = course.credits * config.lab_slots_per_credit
+                num_sessions = total_lab_slots // session_duration
+                total_units = num_sessions * session_duration * len(groups)  # মোট স্লট
+            else:
+                total_units = course.credits * len(groups)  # থিওরির জন্য ক্রেডিট = স্লট
+
             if course.teacher:
-                teacher_totals[course.teacher.id] = teacher_totals.get(course.teacher.id, 0) + total_credits
-            batch_totals[(course.department.id, course.semester.id)] = batch_totals.get((course.department.id, course.semester.id), 0) + total_credits
+                teacher_totals[course.teacher.id] = teacher_totals.get(course.teacher.id, 0) + total_units
+            batch_totals[(course.department.id, course.semester.id)] = batch_totals.get((course.department.id, course.semester.id), 0) + total_units
 
         constraints = ScheduleConstraint(days, time_slots, batch_constraints_dict, teacher_totals, batch_totals)
 
-        # চলমান অন্যান্য রুটিনের লোড নিয়ে নেওয়া (পুরো সিস্টেম)
+        # চলমান রুটিন লোড
         existing_routines = RoutineEntry.objects.select_related(
             'day', 'time_slot', 'course', 'course__teacher', 'course__department', 'course__semester', 'room'
         ).filter(is_active=True)
@@ -326,7 +310,7 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
                 grp_str = f" ({grp})" if grp else ""
                 dropped_sessions.append(f"Fixed-Dropped: {course.course_code}{grp_str} at {day.name} {slot.start_time}")
 
-        # ========== ধাপ ২: সমস্ত সেশন তৈরি (ল্যাব আগে, থিওরি পরে) ==========
+        # ========== ধাপ ২: সেশন তৈরি (ল্যাব → থিওরি) ==========
         all_lab_sessions = []
         all_theory_sessions = []
 
@@ -342,10 +326,12 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
                     continue
 
                 if is_lab:
-                    # ল্যাব: প্রতি ক্রেডিট = 2 স্লট; মোট সেশন = remaining_credits (প্রতিটি সেশন 2 স্লট)
-                    for _ in range(remaining_credits):
+                    session_duration = 2 if config.lab_force_pair else 1
+                    total_slots_needed = remaining_credits * config.lab_slots_per_credit
+                    num_sessions = total_slots_needed // session_duration
+                    for _ in range(num_sessions):
                         all_lab_sessions.append({
-                            'course': course, 'group': grp, 'duration': 2,
+                            'course': course, 'group': grp, 'duration': session_duration,
                             'is_lab': True, 'req_capacity': req_capacity
                         })
                 else:
@@ -355,11 +341,13 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
                             'is_lab': False, 'req_capacity': req_capacity
                         })
 
-        # এলোমেলো করে তারপর ল্যাব → থিওরি সাজানো
         random.shuffle(all_lab_sessions)
         random.shuffle(all_theory_sessions)
-        # ল্যাবগুলোকেও গ্রুপিং অনুযায়ী ভেতরে সাজাতে পারি (একক ল্যাব আগে, গ্রুপ ল্যাব পরে)
-        all_lab_sessions.sort(key=lambda x: (0 if x['course'].id in course_fixed_groups and len(course_groups_info[x['course'].id]['groups'])>1 else 1, x['course'].id))
+        # ল্যাবের ভেতরে গ্রুপ ওয়ালা আগে (প্যারালালাইজেশনের জন্য)
+        all_lab_sessions.sort(key=lambda x: (
+            0 if len(course_groups_info[x['course'].id]['groups']) > 1 else 1,
+            x['course'].id
+        ))
         all_sessions = all_lab_sessions + all_theory_sessions
 
         total_required = scheduled_count + len(all_sessions)
@@ -370,6 +358,10 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
         }
 
         # ========== ধাপ ৩: সেশন বসানো ==========
+        # গ্রুপ ল্যাবের জন্য প্যারালাল ট্র্যাকিং
+        # একই কোর্সের ভিন্ন গ্রুপের জন্য ইতিমধ্যে নির্ধারিত স্লট ম্যাপ রাখব
+        parallel_slot_map = {}  # (course_id, day_id, start_slot) -> list of groups already placed
+
         for session in all_sessions:
             course = session['course']
             duration = session['duration']
@@ -389,6 +381,10 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
                 random.random()
             ))
 
+            # গ্রুপ ল্যাব হলে প্যারালালাইজেশনের চেষ্টা প্রথমে
+            groups_list = course_groups_info[course.id]['groups']
+            is_group_lab = is_lab and len(groups_list) > 1
+
             for emergency_mode in [False, True]:
                 if best_options:
                     break
@@ -401,7 +397,22 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
                     occupied_slots = constraints.batch_schedule_map.get(b_key_grp, set()).union(
                                      constraints.batch_schedule_map.get(b_key_all, set()))
 
-                    for i in range(len(time_slots) - duration + 1):
+                    # যদি গ্রুপ ল্যাব হয়, তাহলে আগে দেখা যাক একই স্লটে অন্য গ্রুপ বসেছে কিনা
+                    parallel_targets = []
+                    if is_group_lab:
+                        # parallel_slot_map থেকে এই কোর্সের জন্য বসানো গ্রুপগুলোর স্লট খুঁজি
+                        for (cid, did, s_start), grps in parallel_slot_map.items():
+                            if cid == course.id and did == day.id:
+                                # একই শুরু স্লটে বসানোর চেষ্টা করব
+                                if len(grps) < config.max_parallel_lab_groups:
+                                    parallel_targets.append(s_start)
+
+                    # টার্গেট স্লটগুলো আগে ট্রাই করি (প্যারালাল)
+                    candidate_starts = list(parallel_targets)
+                    # তারপর বাকি সব সম্ভাব্য স্লট
+                    candidate_starts += [i for i in range(len(time_slots) - duration + 1) if i not in candidate_starts]
+
+                    for i in candidate_starts:
                         if not constraints.can_schedule_continuous(day.id, i, duration, course, group_name, is_emergency=emergency_mode):
                             continue
 
@@ -434,8 +445,8 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
                             else:
                                 score += config.center_gravity_bonus
 
-                        # ৩) প্যারালাল ল্যাব বোনাস (গ্রুপ ল্যাবের জন্য)
-                        if is_lab and course_groups_info[course.id]['groups'].__len__() > 1:
+                        # ৩) প্যারালাল ল্যাব বোনাস (গ্রুপ ল্যাব)
+                        if is_group_lab:
                             parallel_bonus = 0
                             for w_slot in window_slots:
                                 check_key = (day.id, w_slot.id, course.department.id, course.semester.id)
@@ -443,9 +454,12 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
                                 siblings = [g for g in groups_here if g is not None and g != group_name]
                                 if siblings:
                                     parallel_bonus += config.parallel_bonus
+                            # যদি parallel_targets-এ এই স্লট থাকে, অতিরিক্ত বোনাস
+                            if i in parallel_targets:
+                                parallel_bonus += config.parallel_bonus * 2
                             score += parallel_bonus
 
-                        # ৪) গ্যাপ / ফাঁকা
+                        # ৪) গ্যাপ
                         if occupied_slots:
                             min_gap = float('inf')
                             for o in occupied_slots:
@@ -462,7 +476,7 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
                         else:
                             score += config.zero_gap_bonus
 
-                        # ৫) একটানা ব্লক পেনাল্টি
+                        # ৫) একটানা পেনাল্টি
                         left_count, right_count = 0, 0
                         l_idx, r_idx = i-1, i+duration
                         while l_idx in occupied_slots and l_idx not in constraints.lunch_indices:
@@ -473,7 +487,7 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
                         if total_continuous > 2:
                             score -= (total_continuous - 2) * config.continuous_class_penalty
 
-                        # ৬) ব্লকের পর বিরতি বোনাস
+                        # ৬) বিরতি বোনাস
                         if i + duration < total_slots:
                             next_slot_idx = i + duration
                             if next_slot_idx not in occupied_slots and next_slot_idx not in constraints.lunch_indices:
@@ -494,6 +508,15 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
                         day=day, time_slot=slot, course=course, room=room, group_name=group_name
                     ))
                 scheduled_count += 1
+
+                # প্যারালাল ট্র্যাকিং আপডেট
+                if is_group_lab:
+                    start_slot_idx = constraints.slot_index_map[window_slots[0].id]
+                    key = (course.id, day.id, start_slot_idx)
+                    if key not in parallel_slot_map:
+                        parallel_slot_map[key] = []
+                    parallel_slot_map[key].append(group_name)
+
             else:
                 grp_str = f" ({group_name})" if group_name else ""
                 dropped_sessions.append(f"Dropped: {course.course_code}{grp_str} (Limit/No Slot)")
@@ -534,11 +557,9 @@ def rollback_routine_algorithm(department_id):
     latest_backup = RoutineBackup.objects.filter(department_id=department_id).order_by('-created_at').first()
     if not latest_backup:
         return {"status": "Error", "message": "No backup found."}
-
     setting = SystemSetting.objects.first()
     if setting and setting.is_routine_locked:
         return {"status": "Locked", "message": "System is locked."}
-
     RoutineEntry.objects.filter(course__department_id=department_id).delete()
     routines = [
         RoutineEntry(
@@ -551,5 +572,4 @@ def rollback_routine_algorithm(department_id):
     for entry in routines:
         entry.clean()
         entry.save()
-
     return {"status": "Success", "message": "Routine rolled back successfully."}
