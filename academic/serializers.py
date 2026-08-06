@@ -5,7 +5,6 @@ from rest_framework import serializers
 from .models import ActivityLog, Day, RoomType, RoomSubType, Department, Semester, Course, TimeSlot, RoutineEntry, Room, Notification,Notice,AlgorithmConfig,FixedClassSchedule
 
 
-
 class FixedClassScheduleSerializer(serializers.ModelSerializer):
     # showing related fields for better frontend display
     course_name = serializers.CharField(source='course.course_name', read_only=True)
@@ -107,7 +106,7 @@ class TimeSlotSerializer(serializers.ModelSerializer):
 
 
 
-from rest_framework import serializers
+
 
 
 class RoutineEntrySerializer(serializers.ModelSerializer):

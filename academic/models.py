@@ -467,6 +467,17 @@ class ActivityLog(models.Model):
 
 
 class AlgorithmConfig(models.Model):
+
+    break_after_block_bonus = models.IntegerField(
+        default=20000, 
+        help_text="Bonus for scheduling a break after a block of consecutive classes. (Low: 1000 | Mid: 5000 | High: 20000+). A higher value encourages the algorithm to insert breaks after long blocks of classes."
+        )
+    
+    ideal_load_deviation_penalty = models.IntegerField(
+        default=5000, 
+        help_text="Penalty for deviating from the ideal number of classes per day. (Low: 500 | Mid: 2000 | High: 5000+). A higher value encourages the algorithm to balance the number of classes across days."
+        )
+    
     # [Parallel Classes]
     parallel_bonus = models.IntegerField(
         default=50000,
