@@ -179,7 +179,7 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
         break_after_block_bonus = 20000
         ideal_load_deviation_penalty = 5000
         # নতুন ফিল্ডের ডিফল্ট
-        lab_slots_per_credit = 2
+        lab_slots_per_credit = 1
         lab_force_pair = True
         max_parallel_lab_groups = 2
     config = config_obj if config_obj else DefaultConfig()
