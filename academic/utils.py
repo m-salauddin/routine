@@ -175,8 +175,8 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
     class DefaultConfig:
         parallel_bonus = 50000
         edge_slot_penalty = 2000
-        zero_gap_bonus = 30000          # বাড়ানো হয়েছে
-        gap_penalty_per_slot = 1500     # বাড়ানো হয়েছে
+        zero_gap_bonus = 30000          
+        gap_penalty_per_slot = 1500   
         center_gravity_bonus = 50
         continuous_class_penalty = 100
         day_load_penalty_multiplier = 150
@@ -186,12 +186,12 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
         lab_slots_per_credit = 1
         lab_force_pair = True
         max_parallel_lab_groups = 2
-        # নতুন গ্যাপ ফিল্ড
+       
         gap_square_penalty = 800
         adjacent_cluster_bonus = 5000
     config = config_obj if config_obj else DefaultConfig()
 
-    # ---------- ডাটা প্রস্তুতি ----------
+  
     base_courses = Course.objects.select_related(
         'teacher', 'department', 'semester', 'course_type', 'course_sub_type',
         'fixed_room', 'preferred_room_department', 'offering_department'
@@ -206,7 +206,7 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
         old_routines = RoutineEntry.objects.filter(course__department_id=department_id)
         fixed_schedules = FixedClassSchedule.objects.filter(course__department_id=department_id)
 
-    # ব্যাকআপ ট্রানজেকশনের বাইরে
+   
     if old_routines.exists():
         backup_list = [{
             'day_id': e.day_id, 'time_slot_id': e.time_slot_id,
@@ -259,7 +259,7 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
                 'is_lab': is_lab
             }
 
-            # টিচার/ব্যাচ টোটাল হিসাব
+          
             if is_lab:
                 session_duration = 2 if config.lab_force_pair else 1
                 total_lab_slots = course.credits * config.lab_slots_per_credit
@@ -274,7 +274,7 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
 
         constraints = ScheduleConstraint(days, time_slots, batch_constraints_dict, teacher_totals, batch_totals)
 
-        # চলমান রুটিন লোড
+        
         existing_routines = RoutineEntry.objects.select_related(
             'day', 'time_slot', 'course', 'course__teacher', 'course__department', 'course__semester', 'room'
         ).filter(is_active=True)
@@ -286,7 +286,7 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
         scheduled_count = 0
         dropped_sessions = []
 
-        # ========== ধাপ ১: ফিক্সড শিডিউল ==========
+        
         for fs in fixed_schedules:
             course = fs.course
             day = fs.day
@@ -337,7 +337,7 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
                     drop_msg += f" - {reason}"
                 dropped_sessions.append(drop_msg)
 
-        # ========== ধাপ ২: সেশন তৈরি (ল্যাব → থিওরি) ==========
+        
         all_lab_sessions = []
         all_theory_sessions = []
 
@@ -370,7 +370,7 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
 
         random.shuffle(all_lab_sessions)
         random.shuffle(all_theory_sessions)
-        # গ্রুপ ল্যাব আগে (প্যারালালাইজেশনের জন্য)
+       
         all_lab_sessions.sort(key=lambda x: (
             0 if len(course_groups_info[x['course'].id]['groups']) > 1 else 1,
             x['course'].id
@@ -379,12 +379,12 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
 
         total_required = scheduled_count + len(all_sessions)
 
-        # আদর্শ দৈনিক লোড
+        
         ideal_day_load = {
             bid: total / constraints.total_days for bid, total in batch_totals.items()
         }
 
-        # প্যারালাল ট্র্যাকার
+       
         parallel_slot_map = {}  # (course_id, day_id, start_slot) -> [group_names]
 
         for session in all_sessions:
@@ -401,7 +401,7 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
 
             best_options = []
 
-            # দিন সাজাই কম লোড আগে
+            
             sorted_days = sorted(days, key=lambda d: (
                 constraints.get_batch_day_load(course.department.id, course.semester.id, d.id, group_name)
             ))
@@ -421,20 +421,19 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
                     occupied_slots = constraints.batch_schedule_map.get(b_key_grp, set()).union(
                                      constraints.batch_schedule_map.get(b_key_all, set()))
 
-                    # ---------- নতুন: গ্যাপ-সাইজ ভিত্তিক স্লট অর্ডারিং ----------
-                    # প্রথমে occupied_slots থেকে ছোট গ্যাপ খুঁজে প্রায়োরিটি লিস্ট তৈরি
+                    
                     gap_candidates = []
                     all_slot_positions = set(range(len(time_slots) - duration + 1))
 
                     if occupied_slots:
-                        # সম্ভাব্য গ্যাপ খুঁজি
+                        
                         sorted_occ = sorted(occupied_slots)
-                        # প্রতিটি ফাঁকা জায়গা চেক করি
+                        
                         for start in all_slot_positions:
-                            # এই স্লট উইন্ডোতে কোনো occupied overlap না থাকলে
+                            
                             window_range = set(range(start, start + duration))
                             if window_range.isdisjoint(occupied_slots):
-                                # গ্যাপ সাইজ বের করি (সবচেয়ে কাছের occupied স্লটের দূরত্ব)
+                                
                                 left_gap = start - (max([o for o in sorted_occ if o < start], default=-1)) - 1
                                 right_gap = (min([o for o in sorted_occ if o >= start + duration], default=total_slots)) - (start + duration)
                                 if left_gap < 0: left_gap = total_slots  # any big number
@@ -442,13 +441,13 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
                                 min_gap = min(left_gap, right_gap)
                                 gap_candidates.append((min_gap, start))
                     else:
-                        # কোনো ক্লাস নেই, সব স্লট সমান
+                        
                         gap_candidates = [(0, start) for start in all_slot_positions]
 
-                    # গ্যাপ ছোট থেকে বড় সাজাই, সমান হলে সেন্টার গ্র্যাভিটি বোনাসের জন্য ইন্ডেক্স
+                    
                     gap_candidates.sort(key=lambda x: (x[0], abs(x[1] - total_slots//2)))
 
-                    # প্যারালাল টার্গেট প্রথমে
+                    
                     parallel_targets = []
                     if is_group_lab:
                         for (cid, did, s_start), grps in parallel_slot_map.items():
@@ -456,7 +455,7 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
                                 if len(grps) < config.max_parallel_lab_groups:
                                     parallel_targets.append(s_start)
 
-                    # ক্যান্ডিডেট স্টার্ট: parallel_targets তারপর gap_candidates (parallel_targets বাদে)
+                    
                     final_candidates = []
                     for p in parallel_targets:
                         if p not in [c[1] for c in gap_candidates]:
@@ -480,10 +479,10 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
                         if not selected_room:
                             continue
 
-                        # ---------- স্কোরিং (পরিবর্ধিত গ্যাপ স্কোরিং সহ) ----------
+                        
                         score = 0
 
-                        # ১) লোড ব্যালেন্স
+                        
                         bid = (course.department.id, course.semester.id)
                         current_b_load = constraints.get_batch_day_load(course.department.id, course.semester.id, day.id, group_name)
                         ideal = ideal_day_load.get(bid, current_b_load)
@@ -491,7 +490,7 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
                         balance_score = (ideal - new_load) * config.load_balance_factor
                         score += balance_score
 
-                        # ২) এজ স্লট পেনাল্টি
+                       
                         for w_idx in range(i, i+duration):
                             if w_idx == 0 or w_idx == total_slots - 1:
                                 score -= config.edge_slot_penalty * 2
@@ -500,7 +499,7 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
                             else:
                                 score += config.center_gravity_bonus
 
-                        # ৩) প্যারালাল ল্যাব বোনাস
+                       
                         if is_group_lab:
                             parallel_bonus = 0
                             for w_slot in window_slots:
@@ -513,7 +512,7 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
                                 parallel_bonus += config.parallel_bonus * 2
                             score += parallel_bonus
 
-                        # ৪) গ্যাপ/ক্লাস্টারিং স্কোর (নতুন)
+                        
                         if occupied_slots:
                             min_gap = float('inf')
                             left_gap, right_gap = None, None
@@ -530,19 +529,19 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
                                         right_gap = gap
 
                             if min_gap == 0:
-                                # জিরো গ্যাপ = ঠিক পাশাপাশি
+                                
                                 score += config.zero_gap_bonus * 2
                                 # additional adjacent cluster bonus
                                 score += config.adjacent_cluster_bonus
                             else:
-                                # গ্যাপ পেনাল্টি (linear + squared)
+                                
                                 score -= min_gap * config.gap_penalty_per_slot
                                 score -= (min_gap ** 2) * config.gap_square_penalty
                         else:
-                            # প্রথম ক্লাস, কোনো গ্যাপ নাই, জিরো-গ্যাপ বোনাস দিন
+                            
                             score += config.zero_gap_bonus
 
-                        # ৫) একটানা পেনাল্টি
+                        
                         left_count, right_count = 0, 0
                         l_idx, r_idx = i-1, i+duration
                         while l_idx in occupied_slots and l_idx not in constraints.lunch_indices:
@@ -553,7 +552,7 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
                         if total_continuous > 2:
                             score -= (total_continuous - 2) * config.continuous_class_penalty
 
-                        # ৬) বিরতি বোনাস
+                       
                         if i + duration < total_slots:
                             next_slot_idx = i + duration
                             if next_slot_idx not in occupied_slots and next_slot_idx not in constraints.lunch_indices:
@@ -586,7 +585,7 @@ def generate_routine_algorithm(department_id, semester_id=None, ignore_warnings=
                 grp_str = f" ({group_name})" if group_name else ""
                 dropped_sessions.append(f"Dropped: {course.course_code}{grp_str} (Limit/No Slot)")
 
-        # ড্রপ থাকলে সতর্কতা
+        
         if dropped_sessions and not ignore_warnings:
             transaction.set_rollback(True)
             return {
