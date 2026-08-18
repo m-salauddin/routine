@@ -93,14 +93,14 @@ RESOURCE_MAP = {
 
 
 class FixedClassScheduleListCreateView(APIView):
-    # get মেথড আগের মতো থাকবে
+    
     ...
 
     def post(self, request):
         if not self.is_admin(request.user):
             return Response({"error": "Only admins can perform this action."}, status=status.HTTP_403_FORBIDDEN)
         
-        # ডাটা ভ্যালিডেশন
+       
         course_id = request.data.get('course')
         day_id = request.data.get('day')
         time_slot_id = request.data.get('time_slot')
@@ -110,7 +110,7 @@ class FixedClassScheduleListCreateView(APIView):
         if not all([course_id, day_id, time_slot_id]):
             return Response({"error": "course, day, and time_slot are required."}, status=status.HTTP_400_BAD_REQUEST)
 
-        # কোর্স, ডে, স্লট অবজেক্ট
+        
         try:
             course = Course.objects.get(id=course_id, is_active=True)
             day = Day.objects.get(id=day_id)
@@ -118,21 +118,21 @@ class FixedClassScheduleListCreateView(APIView):
         except (Course.DoesNotExist, Day.DoesNotExist, TimeSlot.DoesNotExist):
             return Response({"error": "Invalid course, day, or time slot."}, status=status.HTTP_400_BAD_REQUEST)
 
-        # 1. ইতোমধ্যে একই দিন-টাইমে একই কোর্সের ফিক্সড শিডিউল আছে কিনা (unique_together এর বাইরেও)
+        
         if FixedClassSchedule.objects.filter(day=day, time_slot=time_slot, course=course, group_name=group_name).exists():
             return Response({"error": "A fixed schedule already exists for this course at this day and time."}, status=status.HTTP_409_CONFLICT)
 
-        # 2. ব্যাচ কনফ্লিক্ট: একই স্লটে একই ব্যাচের অন্য ফিক্সড বা রুটিন এন্ট্রি আছে কিনা
+        
         dept = course.department
         sem = course.semester
-        # ফিক্সড
+       
         batch_fixed_conflict = FixedClassSchedule.objects.filter(
             day=day, time_slot=time_slot,
             course__department=dept, course__semester=sem
-        ).exclude(course=course)  # নিজের কোর্স ছাড়া
+        ).exclude(course=course)  
         if batch_fixed_conflict.exists():
             return Response({"error": "Batch conflict: Another fixed class exists for this batch at the same time."}, status=status.HTTP_409_CONFLICT)
-        # রুটিন এন্ট্রি
+        
         batch_routine_conflict = RoutineEntry.objects.filter(
             day=day, time_slot=time_slot,
             course__department=dept, course__semester=sem,
@@ -141,7 +141,7 @@ class FixedClassScheduleListCreateView(APIView):
         if batch_routine_conflict.exists():
             return Response({"error": "Batch conflict: An existing routine class exists for this batch at the same time."}, status=status.HTTP_409_CONFLICT)
 
-        # 3. টিচার কনফ্লিক্ট
+      
         teacher = course.teacher
         if teacher:
             teacher_fixed_conflict = FixedClassSchedule.objects.filter(
@@ -157,7 +157,7 @@ class FixedClassScheduleListCreateView(APIView):
             if teacher_routine_conflict.exists():
                 return Response({"error": f"Teacher {teacher.username} already has a class at this time."}, status=status.HTTP_409_CONFLICT)
 
-        # 4. রুম কনফ্লিক্ট (যদি রুম দেওয়া থাকে)
+        
         if room_id:
             try:
                 room = Room.objects.get(id=room_id, is_active=True)
@@ -168,7 +168,7 @@ class FixedClassScheduleListCreateView(APIView):
             if room_fixed_conflict.exists() or room_routine_conflict.exists():
                 return Response({"error": f"Room {room.room_number} is already occupied at this time."}, status=status.HTTP_409_CONFLICT)
 
-        # সব ঠিক থাকলে সেভ
+        
         serializer = FixedClassScheduleSerializer(data=request.data)
         if serializer.is_valid():
             serializer.save()
@@ -197,7 +197,7 @@ class FixedClassScheduleDetailView(APIView):
         return Response({"status": "success", "message": "Fixed class schedule deleted successfully!"}, status=status.HTTP_204_NO_CONTENT)
 
 # ==============================================================================
-# ROUTINE CONFLICT CHECKER (Helper Function)
+# ROUTINE CONFLICT CHECKER 
 # ==============================================================================
 def check_routine_conflict(day_id, time_slot_id, room_id, course, exclude_entry_ids=None):
     base_query = RoutineEntry.objects.filter(
@@ -254,13 +254,6 @@ class RoomViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAdminUser]
 
 
-# ==============================================================================
-# TEMPORARY SWAP REQUEST MANAGEMENT
-# ==============================================================================
-
-# ==============================================================================
-# ROUTINE GENERATION & MANAGEMENT APIs
-# ==============================================================================
 
 # class TeacherSwapRequestView(APIView):
 #     permission_classes = [IsAuthenticated]
@@ -1313,7 +1306,7 @@ class NoticeListCreateView(APIView):
     @swagger_auto_schema(
         tags=['Notices'],
         operation_description="**[ADMIN & TEACHER ONLY]** Create a new notice and auto-send notifications to target users.",
-        request_body=NoticeSerializer,  # এই লাইনের কারণেই সোয়াগারে ইনপুট বক্সগুলো আসবে
+        request_body=NoticeSerializer,  
         responses={201: "Success", 400: "Bad Request", 403: "Forbidden"}
     )
     def post(self, request):
@@ -1403,7 +1396,7 @@ class NoticeDetailView(APIView):
         if serializer.is_valid():
             updated_notice = serializer.save()
             
-            # আপনার লেখা নোটিফিকেশন আপডেটের লজিক 
+            
             Notification.objects.filter(related_notice=updated_notice).update(
                 title=updated_notice.title,
                 message=updated_notice.message
