@@ -28,7 +28,7 @@ class FixedClassScheduleSerializer(serializers.ModelSerializer):
 
 
 
-# Added serializers for the new dynamic models so they can be accessed via API if needed
+
 class DaySerializer(serializers.ModelSerializer):
     class Meta:
         model = Day
